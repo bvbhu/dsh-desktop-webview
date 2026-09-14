@@ -25,16 +25,24 @@ env:
   # 与 publish.ps1 的默认值保持一致：win-x64 + Release。
   CONFIGURATION: Release
   RUNTIME: win-x64
-  # 显式指定 NuGet 全局包目录：Windows 上 actions/cache 不展开 ~，
-  # 这里给绝对路径。刻意放在 workspace 之外，免得被 checkout 和
-  # hashFiles 的 glob 扫到。
-  NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
-  # artifact 名里带 sha，方便追溯是哪次提交出的包。
+  # NUGET_PACKAGES 刻意**不**放这里：工作流级 env 只允许 github / secrets /
+  # inputs / vars 四个上下文，引用 runner.* 会被 GitHub 判为
+  # "Unrecognized named-value: 'runner'" 并直接拒绝整个工作流文件（连解析都过不去）。
+  # 它放在下面 build job 的 env 里 —— job 级 env 才允许 runner 上下文。
+  #
+  # 这里存的是完整 40 位 sha（github.sha 本身没有短形式）；名字沿用 SHA_SHORT，
+  # 因为它是 artifact 名的组成部分，改名要同步改 cleanup 里的匹配串。
   SHA_SHORT: ${{ github.sha }}
 
 jobs:
   build:
     runs-on: windows-latest
+
+    env:
+      # 显式指定 NuGet 全局包目录：Windows 上 actions/cache 不展开 ~，
+      # 这里给绝对路径。刻意放在 workspace 之外，免得被 checkout 和
+      # hashFiles 的 glob 扫到。
+      NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
 
     strategy:
       # 一个模式失败时仍然把另一个跑完 —— 两个包各自独立，不该互相拖累。
