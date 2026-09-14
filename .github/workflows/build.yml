@@ -38,12 +38,6 @@ jobs:
   build:
     runs-on: windows-latest
 
-    env:
-      # 显式指定 NuGet 全局包目录：Windows 上 actions/cache 不展开 ~，
-      # 这里给绝对路径。刻意放在 workspace 之外，免得被 checkout 和
-      # hashFiles 的 glob 扫到。
-      NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
-
     strategy:
       # 一个模式失败时仍然把另一个跑完 —— 两个包各自独立，不该互相拖累。
       fail-fast: false
@@ -66,21 +60,29 @@ jobs:
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
-          # 和上面 NUGET_PACKAGES 是同一个目录，必须是绝对路径。
-          path: ${{ env.NUGET_PACKAGES }}
+          # 必须与下面各 dotnet 步骤的 NUGET_PACKAGES 是同一个绝对路径。
+          path: ${{ runner.temp }}\nuget-packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
           restore-keys: |
             nuget-${{ runner.os }}-
 
       # TreatWarningsAsErrors=true，所以这一步顺带就是"0 警告"门禁。
       # 这里刻意不带 -r：发布才是 RID 相关的，先做一次与 RID 无关的干净编译。
+      #
+      # NUGET_PACKAGES 必须逐个步骤写：runner 上下文只在
+      # jobs.<job_id>.steps.env 这一层可用，工作流级 env 和 job 级 env 都会
+      # 被 GitHub 判为 "Unrecognized named-value: 'runner'" 而拒绝整个文件。
       - name: Build (0 warnings gate)
+        env:
+          NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
         run: dotnet build DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
 
       # 不带 --no-build：让 test 自己按需编译。上面那次 build 没带 RID，
       # 而 publish 会带 RID，两者的输出路径/中间产物并不共用；靠 --no-build
       # 去复用很容易在 RID 组合上踩空，让测试莫名其妙地找不到程序集。
       - name: Test
+        env:
+          NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
         run: dotnet test DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
 
       # 与 publish.ps1 同一条命令、同一套校验，只是输出目录换成干净路径：
@@ -92,6 +94,8 @@ jobs:
       #   selfcontained 自包含版，约 180 MB，目标机无需装 .NET
       - name: Publish portable (${{ matrix.mode }})
         shell: pwsh
+        env:
+          NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
         run: |
           $sc = if ("${{ matrix.self_contained }}" -eq "true") { "true" } else { "false" }
           dotnet publish src/DshDesktop.App/DshDesktop.App.csproj `
