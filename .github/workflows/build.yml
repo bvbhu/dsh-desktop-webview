@@ -1,0 +1,178 @@
+name: build-portable
+
+# 便携版自动构建。
+#
+# 触发：每次 push 到 main、以及手动 dispatch（workflow_dispatch）。
+# 产物：Actions Artifacts 里的两个平铺 zip —— 依赖框架版 + 自包含版。
+#       不创建 Release（本项目暂不签名，正式发布渠道留待签名方案确定后再开）。
+# 保留：只保留最新一次构建，旧的 artifact 在构建成功后被自动删除。
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支上的新提交会取消上一次还在跑的构建 —— 中间态没有留存价值。
+concurrency:
+  group: build-portable-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: write # 删除本仓库的旧 artifact 需要写权限
+
+env:
+  # 与 publish.ps1 的默认值保持一致：win-x64 + Release。
+  CONFIGURATION: Release
+  RUNTIME: win-x64
+  # 显式指定 NuGet 全局包目录：Windows 上 actions/cache 不展开 ~，
+  # 这里给绝对路径。刻意放在 workspace 之外，免得被 checkout 和
+  # hashFiles 的 glob 扫到。
+  NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
+  # artifact 名里带 sha，方便追溯是哪次提交出的包。
+  SHA_SHORT: ${{ github.sha }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    strategy:
+      # 一个模式失败时仍然把另一个跑完 —— 两个包各自独立，不该互相拖累。
+      fail-fast: false
+      matrix:
+        include:
+          - mode: framework
+            self_contained: "false"
+          - mode: selfcontained
+            self_contained: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          # 和上面 NUGET_PACKAGES 是同一个目录，必须是绝对路径。
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      # TreatWarningsAsErrors=true，所以这一步顺带就是"0 警告"门禁。
+      # 这里刻意不带 -r：发布才是 RID 相关的，先做一次与 RID 无关的干净编译。
+      - name: Build (0 warnings gate)
+        run: dotnet build DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
+
+      # 不带 --no-build：让 test 自己按需编译。上面那次 build 没带 RID，
+      # 而 publish 会带 RID，两者的输出路径/中间产物并不共用；靠 --no-build
+      # 去复用很容易在 RID 组合上踩空，让测试莫名其妙地找不到程序集。
+      - name: Test
+        run: dotnet test DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
+
+      # 与 publish.ps1 同一条命令、同一套校验，只是输出目录换成干净路径：
+      # CI runner 上不存在"运行中的实例锁住 exe / 需要保留运行期数据"的问题，
+      # 所以不用调 publish.ps1（它还会强删目录、等回车）。
+      #
+      # 两种模式都出：
+      #   framework     依赖框架版，约 26 MB，目标机需装 .NET 8 桌面运行时
+      #   selfcontained 自包含版，约 180 MB，目标机无需装 .NET
+      - name: Publish portable (${{ matrix.mode }})
+        shell: pwsh
+        run: |
+          $sc = if ("${{ matrix.self_contained }}" -eq "true") { "true" } else { "false" }
+          dotnet publish src/DshDesktop.App/DshDesktop.App.csproj `
+            -c $env:CONFIGURATION -r $env:RUNTIME --self-contained $sc `
+            -o "artifacts/${{ matrix.mode }}" --nologo
+          if ($LASTEXITCODE -ne 0) { throw "dotnet publish 退出码 $LASTEXITCODE" }
+
+      # publish.ps1 的校验 2 / 校验 4。校验 3（exe 新鲜度）在干净 runner 上
+      # 没有意义，这里不搬。校验 4 是必须的：缺 Microsoft.Windows.SDK.NET.dll
+      # 时合成宿主会静默降级到 hwnd。
+      - name: Verify artifact (${{ matrix.mode }})
+        shell: pwsh
+        run: |
+          $out = "artifacts/${{ matrix.mode }}"
+          $exe = Join-Path $out "DSH-Desktop-Webview.exe"
+          if (-not (Test-Path $exe)) { throw "缺少 $exe" }
+
+          $sdkNet = @(Get-ChildItem -Path $out -Recurse -Filter "Microsoft.Windows.SDK.NET.dll")
+          if ($sdkNet.Count -eq 0) {
+            throw "产物缺少 Microsoft.Windows.SDK.NET.dll —— 合成宿主会初始化失败并回退到 hwnd"
+          }
+
+          # CI 产物必须是"纯程序":运行期数据只会在用户机器上生成。
+          foreach ($name in @("config.json", "run.log", "WebView2Profile", "temp")) {
+            if (Test-Path (Join-Path $out $name)) { throw "产物里混入了运行期数据: $name" }
+          }
+
+          # 自包含版必须真的带上运行时，否则等于发了个装不上运行时的包：
+          # 目标机上会直接报"找不到 .NET 运行时"。coreclr.dll 是运行时本体。
+          if ("${{ matrix.self_contained }}" -eq "true") {
+            if (-not (Test-Path (Join-Path $out "coreclr.dll"))) {
+              throw "自包含版缺少 coreclr.dll —— 运行时没有真正打进产物"
+            }
+          }
+
+          $total = (Get-ChildItem -Path $out -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("OK: {0:N1} MB / {1} 个文件" -f ($total / 1MB), (Get-ChildItem -Path $out -Recurse -File).Count)
+
+      - name: Package zip (${{ matrix.mode }})
+        shell: pwsh
+        run: |
+          # 先压好再上传：upload-artifact 自己也会打一层 zip，用户会拿到
+          # "zip 里套 zip"。这里显式产出一个可直接解压使用的压缩包。
+          # 名字里写清模式，用户在 Artifacts 列表里一眼能分辨。
+          Compress-Archive -Path "artifacts/${{ matrix.mode }}/*" `
+            -DestinationPath "DSH-Desktop-Webview-${{ matrix.mode }}-$env:SHA_SHORT.zip" -Force
+
+      - name: Upload artifact (${{ matrix.mode }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Desktop-Webview-${{ matrix.mode }}-${{ env.SHA_SHORT }}
+          path: DSH-Desktop-Webview-${{ matrix.mode }}-${{ env.SHA_SHORT }}.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # 清理必须单独成一个 job：matrix 的两条腿是并行跑的，如果各自在结尾做清理，
+  # 它们会互相把对方刚上传的 artifact 删掉（先跑完的那条会看到另一条是"旧的"）。
+  # needs: build 保证两个包都上传完再动手。
+  cleanup:
+    needs: build
+    if: success()
+    runs-on: windows-latest
+
+    steps:
+      # 只保留最新一次构建：删掉除本次以外的所有 artifact。
+      # 用 runner 自带的 gh CLI（GitHub Hosted Runner 预装），避免再引一个
+      # 第三方 action 当供应链依赖。
+      - name: Delete older artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+          # 本次构建的两个包都算"当前"，都要留。
+          $current = @(
+            "DSH-Desktop-Webview-framework-$env:SHA_SHORT",
+            "DSH-Desktop-Webview-selfcontained-$env:SHA_SHORT"
+          )
+
+          $json = gh api "repos/$repo/actions/artifacts?per_page=100" | ConvertFrom-Json
+          $stale = @($json.artifacts | Where-Object { $_.name -notin $current })
+
+          if ($stale.Count -eq 0) {
+            Write-Host "没有需要清理的旧 artifact。"
+            exit 0
+          }
+
+          foreach ($a in $stale) {
+            Write-Host ("删除旧 artifact: {0} (id={1}, 创建于 {2})" -f $a.name, $a.id, $a.created_at)
+            gh api -X DELETE "repos/$repo/actions/artifacts/$($a.id)" | Out-Null
+          }
+          Write-Host ("已清理 {0} 个旧 artifact。" -f $stale.Count)

@@ -1,0 +1,28 @@
+<UserControl x:Class="DshDesktop.App.PickerSurface"
+             x:Name="Root"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:cp="clr-namespace:ColorPicker;assembly=ColorPicker">
+    <!-- 三方取色控件的唯一落点。隔离在这一层的原因有两个：
+         ① 我们的控件类就叫 ColorPicker，与库的命名空间同名 —— 在那一类里写 ColorPicker.Xxx
+            会被解析成我们自己的类（编译期就会报"类型 ColorPicker 中不存在类型名 ColorSliders"）；
+         ② 换库/升级库时只需要动这一个文件。 -->
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- 色相环 + 饱和度/明度方块 -->
+        <cp:SquarePicker Grid.Column="0"
+                         Width="176" Height="176"
+                         Style="{DynamicResource ColorPickerHostStyle}"
+                         SelectedColor="{Binding Color, ElementName=Root, Mode=TwoWay}" />
+
+        <!-- HSV / HSL / RGB 滑轨。SelectedColor 的元数据是普通 PropertyMetadata（不是
+             默认双向），所以 Mode=TwoWay 必须显式写 —— 少写这一处，拖动取色器的结果就回不到配置。 -->
+        <cp:ColorSliders x:Name="Sliders" Grid.Column="1" Margin="12,0,0,0"
+                         Style="{DynamicResource ColorPickerHostStyle}"
+                         SelectedColor="{Binding Color, ElementName=Root, Mode=TwoWay}" />
+    </Grid>
+</UserControl>

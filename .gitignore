@@ -1,0 +1,55 @@
+# ============================================================
+# DSH-Desktop-Webview .gitignore
+# 构建产物 / 临时文件一律不入库；源码、脚本、文档全部跟踪。
+# ============================================================
+
+# ---- .NET 构建输出（dotnet build / publish 随时重建）----
+[Bb]in/
+[Oo]bj/
+out/
+build/
+artifacts/
+
+# 说明：artifacts/portable（便携版应用）是 publish.ps1 的产物，
+# 保留在本机磁盘上但不入库——需要时运行 publish.ps1 重新生成。
+
+# ---- 测试结果 ----
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# ---- 日志与临时文件 ----
+*.log
+*.err
+*.out
+*.tmp
+*.old
+*.cache
+*.binlog
+*.pid
+
+# ---- Visual Studio / Rider 用户态文件 ----
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.DotSettings.user
+
+# ---- NuGet ----
+*.nupkg
+packages/
+
+
+
+# ---- 操作系统杂项 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- 工具/仓库本地状态 ----
+# 注意：publish-keep-data.ps1 是随仓库分发的源码脚本（保留数据版发布），
+# 曾被误列在此处导致不入库，已移除——不要再把它加回忽略列表。
+.dsh/

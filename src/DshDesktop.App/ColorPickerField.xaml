@@ -1,0 +1,154 @@
+<UserControl x:Class="DshDesktop.App.ColorPickerField"
+             x:Name="Root"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:DshDesktop.App">
+    <UserControl.Resources>
+        <!-- 透明底衬：半透明颜色没有它就看不出透明度，跟"纯深色"长得一模一样 -->
+        <DrawingBrush x:Key="CheckerBoard" TileMode="Tile" Stretch="None"
+                      Viewport="0,0,8,8" ViewportUnits="Absolute">
+            <DrawingBrush.Drawing>
+                <DrawingGroup>
+                    <GeometryDrawing Brush="#40808080">
+                        <GeometryDrawing.Geometry>
+                            <RectangleGeometry Rect="0,0,4,4" />
+                        </GeometryDrawing.Geometry>
+                    </GeometryDrawing>
+                    <GeometryDrawing Brush="#40808080">
+                        <GeometryDrawing.Geometry>
+                            <RectangleGeometry Rect="4,4,4,4" />
+                        </GeometryDrawing.Geometry>
+                    </GeometryDrawing>
+                </DrawingGroup>
+            </DrawingBrush.Drawing>
+        </DrawingBrush>
+
+        <!-- 色块按钮：只画一圈边框，里面装的是当前颜色 -->
+        <Style x:Key="SwatchButtonStyle" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Ring" CornerRadius="6" BorderThickness="1" Padding="2"
+                                BorderBrush="{DynamicResource PanelBorderBrush}"
+                                Background="{DynamicResource InputBackgroundBrush}">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Ring" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- 调色板格子 -->
+        <Style x:Key="PaletteCellStyle" TargetType="Button">
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Cell" CornerRadius="5" BorderThickness="1" Margin="2"
+                                BorderBrush="{DynamicResource SwatchBorderBrush}"
+                                Background="{Binding Background, RelativeSource={RelativeSource TemplatedParent}}" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Cell" Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
+                                <Setter TargetName="Cell" Property="BorderThickness" Value="2" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <StackPanel>
+        <!-- 收起状态：**一个**按钮。整块可点，点开即取色器弹层。
+             色块表达当前颜色，右侧 ▾ 只是"这里能展开"的视觉提示（不单独响应点击，
+             命中区域归整块）。✕ 是另一种语义（清除 → 跟随主题），仍独立。 -->
+        <Grid HorizontalAlignment="Left">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <Button x:Name="SwatchButton" Grid.Column="0" Height="28"
+                    Style="{StaticResource SwatchButtonStyle}"
+                    Click="SwatchButton_Click"
+                    ToolTip="点击选择颜色">
+                <StackPanel Orientation="Horizontal" Margin="2,0,0,0">
+                    <Grid Width="32" Height="20" VerticalAlignment="Center">
+                        <Border x:Name="CheckerLayer" CornerRadius="4"
+                                Background="{StaticResource CheckerBoard}" />
+                        <Border CornerRadius="4" BorderThickness="1"
+                                BorderBrush="{Binding PreviewBorderBrush, ElementName=Root}"
+                                Background="{Binding PreviewBrush, ElementName=Root}">
+                            <TextBlock x:Name="EmptyLabel" Text="主题" FontSize="9"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"
+                                       Foreground="{DynamicResource SubtleTextBrush}"
+                                       Visibility="{Binding EmptyLabelVisibility, ElementName=Root}" />
+                        </Border>
+                    </Grid>
+                    <TextBlock Text="选择颜色" Margin="8,0,0,0" VerticalAlignment="Center"
+                               FontSize="12"
+                               Foreground="{DynamicResource TextBrush}" />
+                    <TextBlock Text="▾" Margin="8,0,2,0" VerticalAlignment="Center"
+                               FontSize="10"
+                               Foreground="{DynamicResource SubtleTextBrush}" />
+                </StackPanel>
+            </Button>
+
+            <Button Grid.Column="1" Margin="6,0,0,0" Width="32" Height="28" Padding="0"
+                    Content="✕" FontSize="10"
+                    Style="{StaticResource SettingsButtonStyle}"
+                    Visibility="{Binding ClearVisibility, ElementName=Root}"
+                    Click="Clear_Click"
+                    ToolTip="清除（跟随主题）" />
+        </Grid>
+
+        <!-- 取色器弹层。Popup 的内容在独立的视觉树里，ElementName 绑定不可靠，
+             所以弹层根的 DataContext 在构造函数里直接设为控件自身（见 .xaml.cs）。 -->
+        <Popup x:Name="PalettePopup"
+               PlacementTarget="{Binding ElementName=SwatchButton}"
+               Placement="Bottom"
+               StaysOpen="False"
+               AllowsTransparency="True"
+               PopupAnimation="Fade"
+               HorizontalOffset="-2" VerticalOffset="4">
+            <Border CornerRadius="8" BorderThickness="1" Padding="12"
+                    Background="{DynamicResource PanelBackgroundBrush}"
+                    BorderBrush="{DynamicResource PanelBorderBrush}">
+                <StackPanel Width="436">
+                    <!-- 取色面（三方控件封在里面）。这里的绑定能写成普通形式，是因为
+                         构造函数把弹层的 DataContext 设成了控件自身。 -->
+                    <local:PickerSurface ShowAlpha="{Binding ShowAlphaSlider}"
+                                         Color="{Binding HubColor, Mode=TwoWay}" />
+
+                    <Border Height="1" Margin="0,12,0,8"
+                            Background="{DynamicResource PanelBorderBrush}" />
+
+                    <TextBlock Text="预设颜色" Style="{StaticResource HintTextStyle}" Margin="0,0,0,6" />
+                    <ItemsControl ItemsSource="{Binding Palette}" Width="436">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <UniformGrid Columns="11" />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Button Width="38" Height="24" Margin="1"
+                                        Style="{StaticResource PaletteCellStyle}"
+                                        Background="{Binding}"
+                                        Tag="{Binding}"
+                                        Click="PaletteCell_Click" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Border>
+        </Popup>
+    </StackPanel>
+</UserControl>

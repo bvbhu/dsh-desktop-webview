@@ -1,0 +1,117 @@
+<!-- 刻意不设 WindowStyle="None"：它会连 WS_CAPTION 一起摘掉，而 DWM 的最小化/最大化过渡动画
+     与窗口的 caption/frame 绑定 —— 实测（2026-09-13）没有 WS_CAPTION 时原生过渡动画不播。
+     无标题栏这件事由 WindowChrome 负责：CaptionHeight=0 加上它对 WM_NCCALCSIZE 的处理，
+     已经让客户区铺满整窗，不需要再靠 WindowStyle=None。
+     退路：DSH_WINDOW_STYLE=none 可退回旧行为（见 MainWindow 构造函数）。 -->
+<Window x:Class="DshDesktop.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wpf="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        xmlns:local="clr-namespace:DshDesktop.App"
+        ResizeMode="CanResize"
+        AllowsTransparency="False"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        UseLayoutRounding="True"
+        Title="DSH Desktop Webview"
+        Icon="pack://application:,,,/app.ico"
+        Width="1024" Height="768">
+    <WindowChrome.WindowChrome>
+        <WindowChrome x:Name="WinChrome"
+                      CaptionHeight="0"
+                      ResizeBorderThickness="6"
+                      GlassFrameThickness="0"
+                      CornerRadius="0" />
+    </WindowChrome.WindowChrome>
+
+    <!-- 细边框：用外层 Border 把内容整体内缩 1px，那条 1px 的环就永远不会被内容盖住。
+         不要改成"叠在最上层的 Border" —— hwnd 宿主的子 HWND 会把它整条吃掉。
+         最大化时把厚度置 0（见 MainWindow.OnStateChanged），与 §7.4「最大化时移除热区」同调。 -->
+    <Border x:Name="WindowFrame"
+            BorderBrush="{DynamicResource WindowBorderBrush}"
+            BorderThickness="1"
+            SnapsToDevicePixels="True">
+
+        <!-- 布局约束（实测得出，勿改）：
+             WebView2（HwndHost 版）是子 HWND，按 airspace 规则永远盖在同窗口内其他 WPF 内容之上，
+             且独占该区域鼠标消息。因此与它重叠的 WPF 浮层既不渲染也收不到鼠标。
+             - composition 模式（默认）：WebView2CompositionControl 走 D3DImage，可与 WPF 浮层共存，
+               于是宿主跨满整窗、顶栏退化成透明浮层 —— 即设计文档 §7.1 的"全窗口铺满"。
+             - hwnd 模式（DSH_WEBVIEW_HOST=hwnd）：宿主退回第 1 行，三键与拖动热区待在预留顶栏里，
+               不与它重叠。这是保底路径（不依赖 WinRT 投影程序集）。 -->
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="40" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- 浮层：三个同级元素，互不为祖先，避免点击事件向上冒泡到拖动处理器
+                 （否则点关闭键会同时触发窗口拖动）。
+                 Panel.ZIndex=2：合成版宿主会跨满两行铺在下面，浮层必须浮在它之上；
+                 且必须高于加载浮层的 ZIndex=1 —— 启动加载期间三键要可点、拖动条要可拖
+                 （层级约定：窗口控制按钮 > 拖动条 > 加载浮层 > 宿主）。 -->
+            <Grid Grid.Row="0" Panel.ZIndex="2">
+                <!-- 整条顶栏的拖动面兼底色。composition 模式下代码会把它 Collapsed：
+                     那时整窗都是页面，只剩可配置的 DragStrip 与三键浮层（§7.1、§7.3）。
+                     保留它是因为 hwnd 模式下这一条是唯一可拖动的地方。 -->
+                <Border x:Name="TopBar"
+                        Background="{DynamicResource WindowBackgroundBrush}"
+                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown" />
+
+                <Border x:Name="DragStrip"
+                        VerticalAlignment="Top"
+                        HorizontalAlignment="Stretch"
+                        Background="#FF0000"
+                        Opacity="0"
+                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown" />
+
+                <local:ChromeBar x:Name="ChromeBar"
+                                 HorizontalAlignment="Right"
+                                 VerticalAlignment="Top" />
+            </Grid>
+
+            <!-- 宿主容器：两种宿主共用同一布局位置，便于 A/B 对比。
+                 hwnd 版停在第 1 行；composition 版被 SetupWebViewHost 改成 Row=0 + RowSpan=2。
+                 注意 RowSpan 必须同时改 Row：对 Grid.Row=1 的元素设 RowSpan=2，
+                 在只有两行的网格里跨不出第 2 行来，等于没跨。 -->
+            <Grid x:Name="WebHost" Grid.Row="1">
+                <wpf:WebView2 x:Name="WebView" />
+            </Grid>
+
+            <!-- 启动加载浮层：盖在 WebView 区域上，填补"启动 → 页面真正加载完成"之间的空白
+                 （用户要求：启动和探测期间显示动画，加载完成才消失）。
+                 composition 模式随宿主跨满两行（ApplyCompositionLayout 调整 RowSpan）；
+                 hwnd 模式只盖第 1 行，顶栏照常可见。
+                 显隐与文字由会话阶段驱动（MainWindow.UpdateLoadingOverlay）：
+                 Probing/Launching/Ready 显示，NeedsToken/Failed 让位给用户交互。
+                 ZIndex=1：低于顶栏浮层的 2 —— 加载时三键与拖动条仍浮在动画之上。
+                 圆环 = Path 弧线 + RotateTransform 自转，纯 WPF 无第三方依赖。 -->
+            <Grid x:Name="LoadingOverlay" Grid.Row="1" Panel.ZIndex="1"
+                  Background="{DynamicResource WindowBackgroundBrush}">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Path Width="50" Height="50"
+                          Stroke="{DynamicResource AccentBrush}" StrokeThickness="4"
+                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          Data="M 25,5 A 20,20 0 1 1 5,25"
+                          RenderTransformOrigin="0.5,0.5">
+                        <Path.RenderTransform>
+                            <RotateTransform x:Name="LoadingSpin" />
+                        </Path.RenderTransform>
+                        <Path.Triggers>
+                            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                <BeginStoryboard>
+                                    <Storyboard TargetName="LoadingSpin" TargetProperty="Angle">
+                                        <DoubleAnimation From="0" To="360" Duration="0:0:0.9"
+                                                         RepeatBehavior="Forever" />
+                                    </Storyboard>
+                                </BeginStoryboard>
+                            </EventTrigger>
+                        </Path.Triggers>
+                    </Path>
+                    <TextBlock x:Name="LoadingMessage" Text="正在启动…"
+                               Margin="0,18,0,0" FontSize="14"
+                               Foreground="{DynamicResource SubtleTextBrush}" />
+                </StackPanel>
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

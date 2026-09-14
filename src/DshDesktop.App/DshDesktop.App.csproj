@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <!-- 17763 = Windows 10 1809。之所以要声明 Windows SDK 版本：合成版宿主
+         WebView2CompositionControl 经 D3DImage 走 WinRT 投影，运行期需要
+         Microsoft.Windows.SDK.NET.dll；仅当 TF 带 windows10.0.x 时该投影程序集才会进产物。
+         裸 net8.0-windows 下它会抛 FileNotFoundException 并直接搞死窗口（见 MainWindow 的探测）。 -->
+    <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- 设计文档 §5.1 免安装布局要求产物名为 DSH-Desktop-Webview.exe -->
+    <AssemblyName>DSH-Desktop-Webview</AssemblyName>
+    <RootNamespace>DshDesktop.App</RootNamespace>
+    <!-- 应用图标。app.ico 由 setting/icon.png 缩放生成（2048px 源图不能直接当图标用；
+         生成脚本 make-icon.ps1 已于 2026-09-14 应用户要求删除，app.ico 已入库，改图标时需重建脚本）。
+         ApplicationIcon = exe 图标（任务栏 / Alt-Tab / 资源管理器）。 -->
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
+    <!-- 颜色选择器。选它的理由：MIT；自带 net8.0-windows7.0 目标（与本项目一致）；
+         控件可组合（SquarePicker / ColorSliders / AlphaSlider 分开用），因此"不提供十六进制
+         输入框"只要不摆 HexColorTextBox 就成立；依赖只有 Models + Xaml.Behaviors 两个小包。
+         对比过的其它候选：Dirkster.ColorPickerLib 只到 netcoreapp3.0；Syncfusion/Infragistics
+         是商业授权；Extended WPF Toolkit 是非商业授权。 -->
+    <PackageReference Include="PixiEditor.ColorPicker" Version="3.4.2.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 同一份 ico 也作为 Resource，供窗口的 Icon 属性用 pack URI 引用 -->
+    <Resource Include="app.ico" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\DshDesktop.Application\DshDesktop.Application.csproj" />
+    <ProjectReference Include="..\DshDesktop.Domain\DshDesktop.Domain.csproj" />
+    <ProjectReference Include="..\DshDesktop.Infrastructure\DshDesktop.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
