@@ -13,6 +13,11 @@ artifacts/
 # 说明：artifacts/portable（便携版应用）是 publish.ps1 的产物，
 # 保留在本机磁盘上但不入库——需要时运行 publish.ps1 重新生成。
 
+# CI 打包步骤的中间产物（stage/ 暂存目录 + 根目录下的交付 zip）。
+# 这些只应存在于 CI runner 上；加上忽略是防止本地手动复现打包时误提交。
+stage/
+DSH-Desktop-View*.zip
+
 # ---- 测试结果 ----
 TestResults/
 *.trx

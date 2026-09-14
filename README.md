@@ -25,14 +25,14 @@
 ## 环境要求
 
 - Windows 10 1809（build 17763）或更高
-- [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0)（较小的压缩包没有打包该运行时）
+- [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) —— **仅依赖框架版需要**；自包含版（`with-net`）已内含运行时，无需另装
 - Microsoft Edge WebView2 Runtime（Windows 11 自带；Windows 10 大多已随更新安装）
 - `dsh`（仅在使用默认启动命令 `dsh web --no-open` 时需要）
 
 ## 快速开始
 
-1. 下载并解压软件
-2. 双击 `DSH-Desktop-Webview.exe`
+1. 下载并解压软件（解压后得到 `DSH Desktop View` 文件夹）
+2. 双击文件夹里的 `DSH-Desktop-Webview.exe`
 
 > 本软件**没有代码签名** ， **首次运行会被 SmartScreen 拦截。** 点 **「更多信息」→「仍要运行」** 即可。
 
@@ -41,6 +41,17 @@
 ### 下载
 
 一般在Releases页面下载，也可以在Actions页面直接下载CI构建产物。
+
+有两个版本，按目标机是否装了 .NET 8 桌面运行时选：
+
+| 压缩包 | 大小 | 需要 .NET 运行时？ | 说明 |
+| --- | --- | --- | --- |
+| `DSH-Desktop-View-<sha>.zip` | 约 7 MB | **需要** | 依赖框架版。目标机必须自行安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0)，否则双击报「找不到 .NET 运行时」 |
+| `DSH-Desktop-View-with-net-<sha>.zip` | 约 75 MB | 不需要 | 自包含版，运行时已打进包内，下载即用 |
+
+两个包解压后都是一个名为 **`DSH Desktop View`** 的文件夹，双击其中的 `DSH-Desktop-Webview.exe` 即可运行。
+
+> 拿不准选哪个就选 `with-net` —— 它体积大一些，但不会因为目标机缺运行时打不开。
 
 ### 更新
 

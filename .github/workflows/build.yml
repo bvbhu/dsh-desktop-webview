@@ -28,11 +28,10 @@ env:
   # NUGET_PACKAGES 刻意**不**放这里：工作流级 env 只允许 github / secrets /
   # inputs / vars 四个上下文，引用 runner.* 会被 GitHub 判为
   # "Unrecognized named-value: 'runner'" 并直接拒绝整个工作流文件（连解析都过不去）。
-  # 它放在下面 build job 的 env 里 —— job 级 env 才允许 runner 上下文。
+  # 它逐步骤写在各 dotnet 步骤的 env 里 —— 只有 steps.env 这一层允许 runner 上下文。
   #
-  # 这里存的是完整 40 位 sha（github.sha 本身没有短形式）；名字沿用 SHA_SHORT，
-  # 因为它是 artifact 名的组成部分，改名要同步改 cleanup 里的匹配串。
-  SHA_SHORT: ${{ github.sha }}
+  # SHA_SHORT（真正的 7 位短 sha）不在这里定义：github.sha 没有短形式，
+  # 需要截断，而截断只能在 shell 里做。见 build job 的 "Resolve short sha" 步骤。
 
 jobs:
   build:
@@ -43,14 +42,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # dist  = 压缩包名（也是 Artifacts 列表里的名字），不带 sha 后缀，
+          #         sha 在 workflow 末尾统一拼上，避免两处各写一遍。
+          # folder= 解压后用户看到的文件夹名；压缩包里只有这一个顶层文件夹。
           - mode: framework
             self_contained: "false"
+            dist: DSH-Desktop-View
+            folder: DSH Desktop View
           - mode: selfcontained
             self_contained: "true"
+            dist: DSH-Desktop-View-with-net
+            folder: DSH Desktop View
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # github.sha 是完整 40 位，且没有内置的短形式；压缩包名只需要 7 位。
+      # 截断只能在 shell 里做（matrix 定义处不支持字符串函数），所以放在这里，
+      # 写进 $GITHUB_ENV 供本 job 后续步骤用 $env:SHA_SHORT 读取。
+      #
+      # 刻意不走 job outputs 传给 cleanup：build 是 matrix job，两条腿都会写
+      # 同一个 output，语义含糊（谁最后跑完算谁的）。cleanup 自己算一次更干脆
+      # —— 它拿到的是同一次 workflow run 的 github.sha，结果必然一致。
+      - name: Resolve short sha
+        shell: pwsh
+        run: |
+          $short = "${{ github.sha }}".Substring(0, 7)
+          "SHA_SHORT=$short" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "短 sha = $short"
 
       - name: Setup .NET 8
         uses: actions/setup-dotnet@v4
@@ -89,9 +109,12 @@ jobs:
       # CI runner 上不存在"运行中的实例锁住 exe / 需要保留运行期数据"的问题，
       # 所以不用调 publish.ps1（它还会强删目录、等回车）。
       #
-      # 两种模式都出：
-      #   framework     依赖框架版，约 26 MB，目标机需装 .NET 8 桌面运行时
-      #   selfcontained 自包含版，约 180 MB，目标机无需装 .NET
+      # 两种模式都出（大小是压缩后 zip 的实测值）：
+      #   framework / DSH-Desktop-View          依赖框架版，约 7 MB，
+      #                                          目标机需装 .NET 8 桌面运行时
+      #   selfcontained / DSH-Desktop-View-with-net
+      #                                          自包含版，约 75 MB，
+      #                                          目标机无需装 .NET
       - name: Publish portable (${{ matrix.mode }})
         shell: pwsh
         env:
@@ -139,15 +162,39 @@ jobs:
         run: |
           # 先压好再上传：upload-artifact 自己也会打一层 zip，用户会拿到
           # "zip 里套 zip"。这里显式产出一个可直接解压使用的压缩包。
-          # 名字里写清模式，用户在 Artifacts 列表里一眼能分辨。
-          Compress-Archive -Path "artifacts/${{ matrix.mode }}/*" `
-            -DestinationPath "DSH-Desktop-Webview-${{ matrix.mode }}-$env:SHA_SHORT.zip" -Force
+          #
+          # 压缩包内必须只有一个顶层文件夹 "DSH Desktop View"（用户解压即得
+          # 一个干净的目录，不会把几十个 dll 散落一地）。注意
+          # Compress-Archive -Path "dir/*" 会把内容平铺到压缩包根部，
+          # 所以先把产物搬进同名的暂存目录，再压缩**目录本身**（不带 /*）。
+          $stage = "stage/${{ matrix.folder }}"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -Path "artifacts/${{ matrix.mode }}/*" -Destination $stage -Recurse -Force
+
+          $zip = "${{ matrix.dist }}-$env:SHA_SHORT.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+
+          # 交付前自检：压缩包里必须恰好一个顶层条目，且名字与预期一致。
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            $tops = @($archive.Entries |
+              ForEach-Object { ($_.FullName -split '[\\/]')[0] } |
+              Sort-Object -Unique)
+            if ($tops.Count -ne 1 -or $tops[0] -ne "${{ matrix.folder }}") {
+              throw "压缩包顶层结构不对，期望只有 '${{ matrix.folder }}'，实际: $($tops -join ', ')"
+            }
+            Write-Host ("OK: {0} —— 顶层 '{1}'，共 {2} 个条目" -f $zip, $tops[0], $archive.Entries.Count)
+          }
+          finally {
+            $archive.Dispose()
+          }
 
       - name: Upload artifact (${{ matrix.mode }})
         uses: actions/upload-artifact@v4
         with:
-          name: DSH-Desktop-Webview-${{ matrix.mode }}-${{ env.SHA_SHORT }}
-          path: DSH-Desktop-Webview-${{ matrix.mode }}-${{ env.SHA_SHORT }}.zip
+          name: ${{ matrix.dist }}-${{ env.SHA_SHORT }}
+          path: ${{ matrix.dist }}-${{ env.SHA_SHORT }}.zip
           if-no-files-found: error
           retention-days: 30
 
@@ -169,10 +216,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $repo = "${{ github.repository }}"
+
+          # 短 sha 在这里重新算一遍：它与 build job 用的是同一个 github.sha，
+          # 结果必然一致；这样就不必让 matrix job 往外传 output（语义含糊）。
+          $env:SHA_SHORT = "${{ github.sha }}".Substring(0, 7)
+
           # 本次构建的两个包都算"当前"，都要留。
+          # 名字必须与 build job 的 upload-artifact 完全一致，否则会把刚上传的
+          # 产物当"旧的"删掉。cleanup 与 build 是两个独立 job，无法共享 matrix，
+          # 所以这里只能重写一遍 —— 改动命名时两处都要改。
+          if ([string]::IsNullOrWhiteSpace($env:SHA_SHORT)) {
+            throw "SHA_SHORT 为空，拒绝清理 —— 否则会把刚上传的产物全部误删"
+          }
           $current = @(
-            "DSH-Desktop-Webview-framework-$env:SHA_SHORT",
-            "DSH-Desktop-Webview-selfcontained-$env:SHA_SHORT"
+            "DSH-Desktop-View-$env:SHA_SHORT",
+            "DSH-Desktop-View-with-net-$env:SHA_SHORT"
           )
 
           $json = gh api "repos/$repo/actions/artifacts?per_page=100" | ConvertFrom-Json
