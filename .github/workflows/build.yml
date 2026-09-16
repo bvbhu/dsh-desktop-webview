@@ -3,7 +3,8 @@ name: build-portable
 # 便携版自动构建。
 #
 # 触发：push 到 main，或手动 dispatch。
-# 产物：Artifacts 里的两个平铺 zip（依赖框架版 + 自包含版）。不创建 Release（尚未签名）。
+# 产物：Artifacts 里的两个包（依赖框架版 + 自包含版）。不创建 Release（尚未签名）。
+#       包由 upload-artifact 自己压缩，解压一次即得一个顶层文件夹，内部不再套 zip。
 # 保留：只保留最新一次构建，旧的 artifact 在构建成功后被删除。
 
 on:
@@ -33,12 +34,12 @@ jobs:
         include:
           - mode: framework
             self_contained: "false"
-            dist: DSH-Desktop-View
-            folder: DSH Desktop View
+            dist: DSH-Desktop-Webview
+            folder: DSH Desktop Webview
           - mode: selfcontained
             self_contained: "true"
-            dist: DSH-Desktop-View-with-net
-            folder: DSH Desktop View
+            dist: DSH-Desktop-Webview-with-net
+            folder: DSH Desktop Webview
 
     steps:
       - name: Checkout
@@ -112,42 +113,37 @@ jobs:
           $total = (Get-ChildItem -Path $out -Recurse -File | Measure-Object -Property Length -Sum).Sum
           Write-Host ("OK: {0:N1} MB / {1} 个文件" -f ($total / 1MB), (Get-ChildItem -Path $out -Recurse -File).Count)
 
-      - name: Package zip (${{ matrix.mode }})
+      - name: Stage portable folder (${{ matrix.mode }})
         shell: pwsh
         run: |
-          # 先压好再上传：upload-artifact 自己也会打一层 zip，用户会拿到「zip 里套 zip」。
+          # 用户下载到的压缩包由 upload-artifact 生成（它总会打一层 zip）。若我们自己先压成
+          # zip 再上传，用户就会拿到「zip 里套 zip」，必须解压两次才能看到 exe。
           #
-          # 压缩包内必须只有一个顶层文件夹（用户解压即得干净目录）。注意
-          # Compress-Archive -Path "dir/*" 会把内容平铺到根部，所以先搬进同名暂存目录，
-          # 再压缩目录本身（不带 /*）。
+          # 所以这里只做目录整理、不产生任何 zip：内容搬进与交付同名的一层文件夹，交给
+          # upload-artifact 压缩。解压时它只剥掉自己那层壳，顶层就是 'DSH Desktop Webview'。
           $stage = "stage/${{ matrix.folder }}"
+          if (Test-Path "stage") { Remove-Item "stage" -Recurse -Force }
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -Path "artifacts/${{ matrix.mode }}/*" -Destination $stage -Recurse -Force
 
-          $zip = "${{ matrix.dist }}-$env:SHA_SHORT.zip"
-          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          # 自检：待打包目录里不能有 zip（那就是「压缩包里还是压缩包」，正是要杜绝的形态）。
+          $nested = @(Get-ChildItem -Path $stage -Recurse -File -Filter "*.zip")
+          if ($nested.Count -gt 0) {
+            throw "待打包目录里混入了 zip，会出现「压缩包里套压缩包」: $($nested.Name -join ', ')"
+          }
 
-          # 交付前自检：压缩包里必须恰好一个顶层条目，且名字与预期一致。
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
-          try {
-            $tops = @($archive.Entries |
-              ForEach-Object { ($_.FullName -split '[\\/]')[0] } |
-              Sort-Object -Unique)
-            if ($tops.Count -ne 1 -or $tops[0] -ne "${{ matrix.folder }}") {
-              throw "压缩包顶层结构不对，期望只有 '${{ matrix.folder }}'，实际: $($tops -join ', ')"
-            }
-            Write-Host ("OK: {0} —— 顶层 '{1}'，共 {2} 个条目" -f $zip, $tops[0], $archive.Entries.Count)
-          }
-          finally {
-            $archive.Dispose()
-          }
+          $total = (Get-ChildItem -Path $stage -Recurse -File | Measure-Object -Property Length -Sum).Sum
+          Write-Host ("OK: 已就绪 {0:N1} MB / {1} 个文件，顶层文件夹 '{2}'" -f `
+            ($total / 1MB), (Get-ChildItem -Path $stage -Recurse -File).Count, "${{ matrix.folder }}")
 
       - name: Upload artifact (${{ matrix.mode }})
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.dist }}-${{ env.SHA_SHORT }}
-          path: ${{ matrix.dist }}-${{ env.SHA_SHORT }}.zip
+          # 只传文件夹本身：upload-artifact 会把它作为压缩包的唯一顶层目录（不带 /* 就不会平铺）。
+          path: stage/${{ matrix.folder }}
+          # upload-artifact 默认丢弃以 . 开头的隐藏文件；产物里必须一个不少。
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
 
@@ -175,8 +171,8 @@ jobs:
             throw "SHA_SHORT 为空，拒绝清理 —— 否则会把刚上传的产物全部误删"
           }
           $current = @(
-            "DSH-Desktop-View-$env:SHA_SHORT",
-            "DSH-Desktop-View-with-net-$env:SHA_SHORT"
+            "DSH-Desktop-Webview-$env:SHA_SHORT",
+            "DSH-Desktop-Webview-with-net-$env:SHA_SHORT"
           )
 
           $json = gh api "repos/$repo/actions/artifacts?per_page=100" | ConvertFrom-Json

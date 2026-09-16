@@ -47,6 +47,8 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
     public SettingsWindow(SettingsViewModel vm, SessionViewModel session)
     {
         InitializeComponent();
+        // 版本号在这里露出：主窗口标题栏保持纯标题，两种宿主模式下都不带版本后缀。
+        Title = $"设置 - DSH Desktop Webview {AppVersion.Short}";
         _vm = vm;
         _session = session;
         _lastPhase = session.Phase;
@@ -120,7 +122,7 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
         ConfigSaved?.Invoke(cfg);
 
         MessageBox.Show(this,
-            "已保存，外观项立即生效。\n会话类字段（策略 / 命令 / 正则 / 工作目录）下次启动时生效。",
+            "已保存。\n" + "窗口控制按钮和拖动层立即生效，其余重启后生效。",
             "设置", MessageBoxButton.OK, MessageBoxImage.Information);
 
         Close();

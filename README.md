@@ -33,7 +33,7 @@
 
 ## 快速开始
 
-1. 下载并解压软件（解压后得到 `DSH Desktop View` 文件夹）
+1. 下载并解压软件（解压后得到 `DSH Desktop Webview` 文件夹）
 2. 双击文件夹里的 `DSH-Desktop-Webview.exe`
 
 > 本软件没有代码签名，首次运行会被 SmartScreen 拦截。点「更多信息」→「仍要运行」即可。
@@ -52,10 +52,10 @@
 
 | 压缩包 | 大小 | 需要 .NET 运行时？ | 说明 |
 | --- | --- | --- | --- |
-| `DSH-Desktop-View-<sha>.zip` | 约 7 MB | 需要 | 默认版。必须安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
-| `DSH-Desktop-View-with-net-<sha>.zip` | 约 75 MB | 不需要 | 自包含版，运行时已打进包内，下载即用 |
+| `DSH-Desktop-Webview-<sha>.zip` | 约 7 MB | 需要 | 默认版。必须安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| `DSH-Desktop-Webview-with-net-<sha>.zip` | 约 75 MB | 不需要 | 自包含版，运行时已打进包内，下载即用 |
 
-两个包解压后都是一个名为 `DSH Desktop View` 的文件夹，双击其中的 `DSH-Desktop-Webview.exe` 即可运行。
+两个包解压后都是一个名为 `DSH Desktop Webview` 的文件夹，双击其中的 `DSH-Desktop-Webview.exe` 即可运行。
 
 ### 更新
 
@@ -105,7 +105,7 @@ powershell -ExecutionPolicy Bypass -File .\publish-keep-data.ps1
 | `dsh` 起不来 | 曾强杀外壳会留下 `~/.dsh/.credentials.yaml.lock` 死锁：确认无 `dsh` 进程后删除该文件 |
 | 日志反复出现 `GpuProcessExited` | 多为虚拟显示适配器（远程 / 投屏驱动）环境问题，非程序缺陷，功能不受影响 |
 | 页面加载不出、日志 `[init-fail]` | 检查 WebView2 Runtime 是否安装 |
-| 日志 `[host-fallback]` | 合成宿主不可用已自动降级到 hwnd；也可主动设环境变量 `DSH_WEBVIEW_HOST=hwnd` |
+| 日志 `[host-fallback]` | 合成宿主不可用已自动降级到 hwnd；也可以在设置中开启（在config.json中`"useHwndHost": true`）。 |
 | 首次运行弹「Windows 已保护你的电脑」 | 未签名的正常现象：点「更多信息」→「仍要运行」。不影响功能 |
 | 更新后设置没了 | 解压时清空了目标目录。从备份恢复 `config.json` 与 `WebView2Profile` 即可 |
 | dsh 内部终端一直错误 | 见下方「DSH 工作区不要包含程序目录」一节 |

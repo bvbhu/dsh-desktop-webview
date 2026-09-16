@@ -126,7 +126,6 @@ public partial class MainWindow : System.Windows.Window
         SetupWebViewHost();
         RestoreWindowPosition();
         ApplyAppearance();
-        Title = $"{Title} {AppVersion}";
 
         ChromeBar.MinimizeRequested += (_, _) => WindowState = WindowState.Minimized;
         ChromeBar.MaximizeRequested += (_, _) => ToggleMaximize();
@@ -151,12 +150,12 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 宿主模式。默认合成版：它能被 WPF 浮层覆盖，因而能做出设计文档 §7.1 要求的
-    /// "全窗口铺满 + 三键浮层 + 拖动热区"。留环境变量而不写死，是为了保留一条不必重新
-    /// 编译的退路：合成版经 D3DImage 走 WinRT 投影，运行期需要 Microsoft.Windows.SDK.NET.dll
-    /// （见 csproj 的 TargetFramework 注释），万一加载不了可退回 HwndHost 版。
+    /// 是否用合成宿主。默认合成版：它能被 WPF 浮层覆盖，因而能做出设计文档 §7.1 要求的
+    /// "全窗口铺满 + 三键浮层 + 拖动热区"。两处开关：设置项 <c>UseHwndHost</c>（持久，
+    /// 为文件拖放而设）与环境变量 <c>DSH_WEBVIEW_HOST=hwnd</c>（临时，不必重新编译）。
     /// </summary>
-    private static bool UseCompositionHost =>
+    private bool UseCompositionHost =>
+        !_config.UseHwndHost &&
         !string.Equals(Environment.GetEnvironmentVariable("DSH_WEBVIEW_HOST"), "hwnd",
             StringComparison.OrdinalIgnoreCase);
 
@@ -165,7 +164,10 @@ public partial class MainWindow : System.Windows.Window
         _hwndView = WebView;
         if (!UseCompositionHost)
         {
-            _runLog?.Append("[shell] WebView 宿主=hwnd（HwndHost 子窗口，顶栏形态）");
+            ApplyHwndLayout();
+            _runLog?.Append(_config.UseHwndHost
+                ? "[shell] WebView 宿主=hwnd（设置项开启；HwndHost 子窗口，顶栏形态）"
+                : "[shell] WebView 宿主=hwnd（HwndHost 子窗口，顶栏形态）");
             return;
         }
 
@@ -223,8 +225,14 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// hwnd 布局：宿主退回顶栏之下。那条 40px 的 TopBar 是 hwnd 模式下唯一可拖动的地方，
-    /// 必须留着（合成版模式下它才收起）。
+    /// hwnd 布局：宿主退回顶栏之下，并交还给系统标题栏。
+    /// <para>
+    /// 关键：<c>WindowChrome</c> 必须整个摘掉。<c>GlassFrameThickness=0</c> 会**隐藏**标准
+    /// 标题栏（微软文档原文："disable and hide the standard frame"），<c>CaptionHeight</c>
+    /// 只决定"哪块区域当成标题栏可拖动"，并不能让系统绘制标题文字 —— 实测把 CaptionHeight
+    /// 调成 WindowCaptionHeight 后，客户区仍是 1500×750 == 整窗，标题栏像素高度 0。
+    /// 所以要让 Windows 真正画出标题栏，只能清掉 WindowChrome。
+    /// </para>
     /// </summary>
     private void ApplyHwndLayout()
     {
@@ -233,7 +241,18 @@ public partial class MainWindow : System.Windows.Window
         // hwnd 模式浮层只盖 WebView 行：TopBar 必须可见（它是唯一可拖动的地方）
         System.Windows.Controls.Grid.SetRow(LoadingOverlay, 1);
         System.Windows.Controls.Grid.SetRowSpan(LoadingOverlay, 1);
-        TopBar.Visibility = Visibility.Visible;
+
+        // 交还系统标题栏：清掉 WindowChrome，Windows 才会绘制标题文字与三键，
+        // 并让客户区从标题栏下方开始（这是"标题栏能看见"的唯一途径）。
+        System.Windows.Shell.WindowChrome.SetWindowChrome(this, null);
+
+        // 自绘顶栏整行收掉、三键浮层让位：系统标题栏已经提供了同样的功能，
+        // 留着只会变成一条 40px 空白外加一套与系统按钮重叠的自绘按钮。
+        TopBarRow.Height = new GridLength(0);
+        TopBar.Visibility = Visibility.Collapsed;
+        DragStrip.Visibility = Visibility.Collapsed;
+        ChromeBar.Visibility = Visibility.Collapsed;
+        _runLog?.Append("[shell] hwnd 布局：已移除 WindowChrome，交还系统标题栏");
     }
 
     /// <summary>
@@ -254,12 +273,6 @@ public partial class MainWindow : System.Windows.Window
             return false;
         }
     }
-
-    /// <summary>csproj 里的软件版本号，去掉末尾 ".0" 修订号（显示 1.0.1 而非 1.0.1.0）。</summary>
-    private static string AppVersion =>
-        System.Reflection.Assembly.GetExecutingAssembly().GetName().Version is { } v
-            ? $"{v.Major}.{v.Minor}.{v.Build}"
-            : "1.0.1";
 
     /// <summary>当前生效宿主的 CoreWebView2；未初始化完成时为 null。</summary>
     private CoreWebView2? Core =>
@@ -718,7 +731,9 @@ public partial class MainWindow : System.Windows.Window
     private void OnStateChanged(object? sender, EventArgs e)
     {
         var maximized = WindowState == WindowState.Maximized;
-        WinChrome.ResizeBorderThickness = maximized ? new Thickness(0) : new Thickness(6);
+        // hwnd 模式已摘掉 WindowChrome，此时 _winChrome 为 null —— 缩放热区由系统标题栏接管。
+        if (System.Windows.Shell.WindowChrome.GetWindowChrome(this) is { } chrome)
+            chrome.ResizeBorderThickness = maximized ? new Thickness(0) : new Thickness(6);
         // 最大化时收掉细边框：省回那一圈像素，也与「最大化时移除缩放热区」同调（§7.4）。
         WindowFrame.BorderThickness = maximized ? new Thickness(0) : new Thickness(1);
         ChromeBar.SetMaximized(maximized);

@@ -669,6 +669,30 @@ public class SessionViewModelTests
         vm.DragStripOpacity.Should().Be(cfg.DragStripOpacity);
     }
 
+    // ---- 页面宿主开关（文件拖放需要 HwndHost） ----
+
+    [Fact]
+    public void SettingsViewModel_UseHwndHost_DefaultsFalse_AndRoundTripsThroughBuildConfig()
+    {
+        var vm = new SettingsViewModel(AppConfig.CreateDefault());
+        vm.UseHwndHost.Should().BeFalse();
+
+        vm.UseHwndHost = true;
+
+        vm.BuildConfig().UseHwndHost.Should().BeTrue();
+    }
+
+    [Fact]
+    public void SettingsViewModel_UseHwndHost_RevertsWithSnapshot()
+    {
+        var cfg = AppConfig.CreateDefault();
+        var vm = new SettingsViewModel(cfg) { UseHwndHost = true };
+
+        vm.RevertToSnapshot();
+
+        vm.UseHwndHost.Should().Be(cfg.UseHwndHost);
+    }
+
     [Fact]
     public void SettingsViewModel_AcceptSnapshot_MovesBaseline()
     {

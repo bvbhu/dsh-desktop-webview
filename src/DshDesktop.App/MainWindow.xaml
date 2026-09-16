@@ -40,7 +40,8 @@
                不与它重叠。这是保底路径（不依赖 WinRT 投影程序集）。 -->
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="40" />
+                <!-- 自绘顶栏行。hwnd 模式改用系统标题栏，这一行由 ApplyHwndLayout 收成 0。 -->
+                <RowDefinition x:Name="TopBarRow" Height="40" />
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 

@@ -28,6 +28,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private int _dragStripHeight;
     private string _dragStripColor;
     private double _dragStripOpacity;
+    private bool _useHwndHost;
     private string? _validationError;
 
     public string DefaultUrl { get => _defaultUrl; set => Set(ref _defaultUrl, value); }
@@ -81,6 +82,12 @@ public sealed class SettingsViewModel : ViewModelBase
     }
     public int ChromeHoverDelayMs { get => _chromeHoverDelayMs; set => Set(ref _chromeHoverDelayMs, value); }
     public bool DragStripEnabled { get => _dragStripEnabled; set => Set(ref _dragStripEnabled, value); }
+
+    /// <summary>
+    /// 用 HwndHost 宿主取代合成宿主。为文件拖放而设：合成宿主没有子 HWND，收不到 OLE 拖放。
+    /// 代价是页面不再铺满整窗（顶栏退回实心 40px 条）。下次启动生效 —— 宿主在窗口构造期选定。
+    /// </summary>
+    public bool UseHwndHost { get => _useHwndHost; set => Set(ref _useHwndHost, value); }
     public int DragStripLeftInset { get => _dragStripLeftInset; set => Set(ref _dragStripLeftInset, value); }
     public int DragStripRightInset { get => _dragStripRightInset; set => Set(ref _dragStripRightInset, value); }
     public int DragStripHeight { get => _dragStripHeight; set => Set(ref _dragStripHeight, value); }
@@ -164,6 +171,7 @@ public sealed class SettingsViewModel : ViewModelBase
         _dragStripHeight = config.DragStripHeight;
         _dragStripColor = config.DragStripColor;
         _dragStripOpacity = config.DragStripOpacity;
+        _useHwndHost = config.UseHwndHost;
     }
 
     /// <summary>保存成功后把当前配置立为新基线。</summary>
@@ -244,6 +252,7 @@ public sealed class SettingsViewModel : ViewModelBase
             DragStripHeight = _dragStripHeight,
             DragStripColor = _dragStripColor,
             DragStripOpacity = _dragStripOpacity,
+            UseHwndHost = _useHwndHost,
         };
     }
 

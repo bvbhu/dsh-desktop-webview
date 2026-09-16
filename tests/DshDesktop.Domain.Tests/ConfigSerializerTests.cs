@@ -140,6 +140,25 @@ public class ConfigSerializerTests
         restored.ServiceStrategy.Should().Be(ServiceStrategy.NeverStart);
     }
 
+    /// <summary>默认仍用合成宿主；开了才走 HwndHost（文件拖放需要它）。</summary>
+    [Fact]
+    public void UseHwndHost_DefaultsFalse_AndRoundTrips()
+    {
+        AppConfig.CreateDefault().UseHwndHost.Should().BeFalse();
+        ConfigSerializer.Serialize(AppConfig.CreateDefault()).Should().Contain("\"useHwndHost\"");
+
+        var cfg = AppConfig.CreateDefault() with { UseHwndHost = true };
+        ConfigSerializer.Deserialize(ConfigSerializer.Serialize(cfg)).UseHwndHost.Should().BeTrue();
+    }
+
+    /// <summary>旧版 config.json 没有该字段，必须回落成 false 而不是崩或误开。</summary>
+    [Fact]
+    public void Deserialize_LegacyJsonWithoutUseHwndHost_DefaultsFalse()
+    {
+        var json = """{"defaultUrl":"http://x/","windowMaximized":false}""";
+        ConfigSerializer.Deserialize(json).UseHwndHost.Should().BeFalse();
+    }
+
     [Fact]
     public void Serialize_OverwritesCompletely()
     {

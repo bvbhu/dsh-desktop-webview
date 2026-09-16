@@ -64,6 +64,7 @@ internal sealed class ConfigDto
     public int WindowWidth { get; set; } = D.WindowWidth;
     public int WindowHeight { get; set; } = D.WindowHeight;
     public bool WindowMaximized { get; set; } = D.WindowMaximized;
+    public bool UseHwndHost { get; set; } = D.UseHwndHost;
 
     public static ConfigDto FromAppConfig(AppConfig c) => new()
     {
@@ -88,6 +89,7 @@ internal sealed class ConfigDto
         WindowWidth = c.WindowWidth,
         WindowHeight = c.WindowHeight,
         WindowMaximized = c.WindowMaximized,
+        UseHwndHost = c.UseHwndHost,
     };
 
     public AppConfig ToAppConfig() => new(
@@ -111,5 +113,6 @@ internal sealed class ConfigDto
         WindowY,
         WindowWidth,
         WindowHeight,
-        WindowMaximized);
+        WindowMaximized,
+        UseHwndHost);
 }

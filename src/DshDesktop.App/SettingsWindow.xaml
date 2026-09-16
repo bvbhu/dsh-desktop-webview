@@ -245,6 +245,24 @@
                     </StackPanel>
                 </Border>
 
+                <!-- ===== 兼容模式（2026-09-16 新增：文件拖放） ===== -->
+                <Border Style="{StaticResource SectionCardStyle}">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="兼容模式" Style="{StaticResource SectionHeaderStyle}" Margin="0" VerticalAlignment="Center" />
+                            <CheckBox Grid.Column="2" Style="{StaticResource SettingsCheckBoxStyle}"
+                                      Content="启用 HwndHost" VerticalAlignment="Center"
+                                      IsChecked="{Binding UseHwndHost, Mode=TwoWay}" />
+                        </Grid>
+                        <local:SelectableHint Text="启用后改用系统标题栏与 HwndHost 宿主，可以拖放文件到页面；默认的合成宿主没有子窗口，收不到系统拖放。&#x0a;代价：自绘顶栏与三键收起，改成系统标题栏。重新启动后生效。" />
+                    </StackPanel>
+                </Border>
+
                 <!-- ===== 拖动层（2026-09-14 按设计图重排）===== -->
                 <Border Style="{StaticResource SectionCardStyle}">
                     <StackPanel>
