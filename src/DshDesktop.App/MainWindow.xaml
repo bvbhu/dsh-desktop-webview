@@ -55,14 +55,20 @@
                      保留它是因为 hwnd 模式下这一条是唯一可拖动的地方。 -->
                 <Border x:Name="TopBar"
                         Background="{DynamicResource WindowBackgroundBrush}"
-                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown" />
+                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown"
+                        MouseMove="DragStrip_MouseMove"
+                        MouseLeftButtonUp="DragStrip_MouseLeftButtonUp"
+                        LostMouseCapture="DragStrip_LostMouseCapture" />
 
                 <Border x:Name="DragStrip"
                         VerticalAlignment="Top"
                         HorizontalAlignment="Stretch"
                         Background="#FF0000"
                         Opacity="0"
-                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown" />
+                        MouseLeftButtonDown="DragStrip_MouseLeftButtonDown"
+                        MouseMove="DragStrip_MouseMove"
+                        MouseLeftButtonUp="DragStrip_MouseLeftButtonUp"
+                        LostMouseCapture="DragStrip_LostMouseCapture" />
 
                 <local:ChromeBar x:Name="ChromeBar"
                                  HorizontalAlignment="Right"

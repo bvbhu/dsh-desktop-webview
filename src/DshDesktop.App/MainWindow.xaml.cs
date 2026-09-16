@@ -1,6 +1,8 @@
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using DshDesktop.Application;
 using DshDesktop.Domain;
@@ -30,6 +32,19 @@ public partial class MainWindow : System.Windows.Window
     // 仅当 DSH_WEBVIEW_HOST=hwnd 时才退回 XAML 声明的 HwndHost 版。
     private WebView2? _hwndView;
     private WebView2CompositionControl? _compositionView;
+
+    // ---- 拖动热区手势判别（备选1·透传点击）----
+    // 合成版宿主必须捕获鼠标才能拖动窗口（WebView2 的组合视觉下，命中测试对每个像素是
+    // 全有或全无 —— 与拖动条重叠的页面像素本来也收不到鼠标）。因此改用手势判别：
+    // 快速点按 → 把这次点击合成转发给页面；按下后拖动超过阈值 → 拖动窗口。
+    // 下面四个字段只在左键按下期间有效。
+    private bool _stripActive;          // 左键已在拖动条按下
+    private Point _stripDownPos;        // 按下位置（窗口坐标，用于算位移阈值）
+    private MouseButtonEventArgs? _stripDownArgs; // 保存 Down 事件，抬起时重建出点击
+    private bool _stripDragging;        // 已越过阈值、进入窗口拖动
+
+    /// <summary>判定"拖动"的最小位移（DIP）。小于它属点击，转发进页面。</summary>
+    private const double DragGestureThreshold = 4;
 
     /// <summary>重置标志，防止浏览器进程连续崩溃时反复重建（见 RecoverFromBrowserCrash）。</summary>
     private bool _recovering;
@@ -183,6 +198,11 @@ public partial class MainWindow : System.Windows.Window
         {
             var view = new WebView2CompositionControl();
             _compositionView = view;
+            // 让 DragStrip 的光标跟随页面：合成宿主在 CursorChanged 里把页面光标设到自己的
+            // Cursor DP，绑过去后，鼠标悬停在拖动条上时显示的也是页面光标（手型/文本等），
+            // 而非默认箭头——与悬停透传配合，顶部 40px 视觉上"不存在"。
+            DragStrip.SetBinding(System.Windows.FrameworkElement.CursorProperty,
+                new System.Windows.Data.Binding(nameof(WebView2CompositionControl.Cursor)) { Source = view });
             ApplyCompositionLayout();
             WebHost.Children.Add(view);
             _runLog?.Append("[shell] WebView 宿主=composition（全窗口铺满，顶栏为透明浮层）");
@@ -515,9 +535,238 @@ public partial class MainWindow : System.Windows.Window
         DragStrip.Visibility = width > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// 拖动热区的左键按下：<b>不立即拖动</b>，先进入手势判别（备选1「透传点击」）。
+    /// 设计文档 §7.3 原本把这一条记为"刻意挡在页面之上"，本改动把它改为
+    /// "快速点按 → 点击透传进页面；按下后位移超阈值 → 拖动窗口"。
+    /// <para>
+    /// 为什么点按能透传：合成版宿主（<c>WebView2CompositionControl</c>）经 D3DImage
+    /// 输出，命中测试在拖动条像素上是 WPF 该条优先 —— 鼠标事件被 WPF 吃掉，
+    /// WebView2 收不到。要让页面收到这次点击，只能由我们把按下/抬起<a>重建</a>出来、
+    /// 再走宿主自带的 <c>OnMouseDown/Up → SendMouseInput</c> 转发进浏览器。
+    /// </para>
+    /// <para>
+    /// 按下后<b>不</b>捕获鼠标（详见方法内注释）：只要位移越过阈值即判定为拖动，
+    /// 放弃透传、改走 <see cref="BeginWindowDrag"/>（原生标题栏拖动，含 Aero 吸附）。
+    /// </para>
+    /// </summary>
     private void DragStrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        DragMove();
+        // 不捕获鼠标：CaptureMouse 会在 Win32 层 SetCapture，与 BeginWindowDrag 的
+        // WM_NCLBUTTONDOWN 标题栏拖动循环打架（窗口拖不动）；更糟的是抬起时
+        // ReleaseMouseCapture 会同步触发 LostMouseCapture、把 _stripDownArgs 清空，
+        // 让 ForwardClickToPage 永远进不去 —— 这正是上一版"既不能拖也不能点"的根因。
+        // 手势判别不需要捕获：阈值仅 4 DIP，40px 高的拖动条内必然收得到足够的
+        // MouseMove 与 MouseLeftButtonUp。
+        _stripActive = true;
+        _stripDownArgs = e;
+        _stripDownPos = e.GetPosition(this);
+        _stripDragging = false;
+        e.Handled = true;
+
+        // hwnd 宿主没有可转发点击的组合控制，手势判别无意义 —— 直接保持旧行为（按下即拖动）。
+        // TopBar 那条也是拖动面（hwnd / 合成版都走这里）。
+        if (_compositionView is null)
+        {
+            BeginWindowDrag();
+        }
+    }
+
+    /// <summary>
+    /// 捕获意外丢失时兜底复位手势状态。本类已不再 <c>CaptureMouse</c>，正常流程不会触发；
+    /// 保留是为防御（例如系统/第三方抢走捕获而恰好没收到 MouseUp）。千万别在这条路径里
+    /// 转发点击 —— 丢失捕获的那次按下本不该算作对页面的点击。
+    /// </summary>
+    private void DragStrip_LostMouseCapture(object? sender, MouseEventArgs e)
+    {
+        _stripActive = false;
+        _stripDragging = false;
+        _stripDownArgs = null;
+    }
+
+    /// <summary>
+    /// 拖动热区上的鼠标移动。两条职责：
+    /// <list type="bullet">
+    /// <item><b>悬停透传</b>：未按下（不在按下手势中）时，把移动以 Move 转发给页面，让悬停
+    ///   效果、光标样式、tooltip 在顶部 40px 也跟随——否则合成宿主的 OnMouseMove 被本条
+    ///   截走，页面收不到，悬停状态停在进入拖动条前的那一刻。</item>
+    /// <item><b>拖动判别</b>：按下手势中位移越过阈值则升级为窗口拖动，交给系统标题栏循环。</item>
+    /// </list>
+    /// </summary>
+    private void DragStrip_MouseMove(object sender, MouseEventArgs e)
+    {
+        // 悬停透传：未处于按下手势时，把光标位置以 Move（无按键）转发给页面。一旦按下
+        // （_stripActive=true）就不再走这条，改由下面的拖动判别接管，避免与拖动判别抢消息。
+        if (!_stripActive)
+        {
+            SendMouseEvent(CoreWebView2MouseEventKind.Move, CoreWebView2MouseEventVirtualKeys.None);
+            return;
+        }
+        if (_stripDragging)
+            return;
+
+        var pos = e.GetPosition(this);
+        if (Math.Abs(pos.X - _stripDownPos.X) + Math.Abs(pos.Y - _stripDownPos.Y) < DragGestureThreshold)
+            return;
+
+        _stripDragging = true;
+        _stripDownArgs = null;
+        // 直接交还给系统标题栏拖动循环。没有 CaptureMouse，无需释放；SendMessage 同步
+        // 跑完整个拖动直到用户松开，期间 _stripDragging=true 阻止重复进入或误判为点击。
+        BeginWindowDrag();
+    }
+
+    /// <summary>
+    /// 拖动热区上的左键抬起：若从未越过阈值（即一次"点按"），把这次点击重建出来
+    /// 转发进页面；否则手势已升级为拖动，抬起交给系统拖动循环处理，这里什么都不做。
+    /// </summary>
+    private void DragStrip_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_stripActive)
+            return;
+        _stripActive = false;
+
+        // 拖动手势已被系统接管，抬起不归我们管。
+        if (_stripDragging)
+        {
+            _stripDragging = false;
+            return;
+        }
+
+        // 快速点按：反射调用宿主的 SendMouseInput（Move→Down→Up）把这次点击送进页面 ——
+        // 与宿主自身 OnMouseDown 走同一条转发通路，但跳过其焦点守卫与 WPF 路由事件
+        // （RaiseEvent 重放实测页面收不到）。合成版宿主不存在时（hwnd 模式）上面 Down
+        // 已直接拖动，不会走到这里。
+        // 关键：不要在转发前 ReleaseMouseCapture —— 会同步触发 LostMouseCapture 清空
+        // _stripDownArgs（上一版 bug）。本类已不再 CaptureMouse，此处无需释放。
+        if (_stripDownArgs is not null && _compositionView is not null)
+        {
+            ForwardClickToPage();
+        }
+        _stripDownArgs = null;
+    }
+
+    /// <summary>
+    /// 缓存的 <c>WebView2CompositionControl.SendMouseInput</c> 反射句柄。
+    /// 该方法是宿主把鼠标送进浏览器的转发原语（其 OnMouseDown/Up/Move 内部即调它），
+    /// 在 XML 文档里有载、但访问级别非 public，故用反射调用。点击透传与悬停透传共用此句柄。
+    /// </summary>
+    private static System.Reflection.MethodInfo? _sendMouseInput;
+
+    /// <summary>
+    /// 把一次鼠标事件经宿主的 <c>SendMouseInput</c> 转发进页面。点击透传与悬停透传共用。
+    /// <para>
+    /// <c>WebView2CompositionControl.SendMouseInput</c> 是宿主把鼠标送进浏览器的转发原语
+    /// （OnMouseDown/Up/Move 内部即调它）。它非 public，但 XML 文档有载——用反射直接调用，
+    /// 绕开 OnMouseDown 里可能的焦点守卫，以及 WPF 路由事件触发的不确定性
+    /// （<c>RaiseEvent(Mouse.MouseDownEvent)</c> 重放实测页面收不到点击）。
+    /// </para>
+    /// <para>
+    /// 坐标：<c>Mouse.GetPosition(_compositionView)</c> 取光标相对宿主的 DIP，乘以
+    /// <c>VisualTreeHelper.GetDpi(...).DpiScaleX</c> 得物理像素客户端坐标
+    /// （与宿主 OnMouseDown 内 <c>e.GetPosition(this) * _dpiScale</c> 同算法）。
+    /// </para>
+    /// <para>
+    /// <c>Core</c> 为 null（CoreWebView2 尚未就绪）时直接放弃——此时页面还没加载，转发只会
+    /// 反复抛异常刷屏；页面就绪后自然恢复。
+    /// </para>
+    /// </summary>
+    private void SendMouseEvent(CoreWebView2MouseEventKind kind, CoreWebView2MouseEventVirtualKeys keys)
+    {
+        if (_compositionView is null || Core is null)
+            return;
+
+        var p = Mouse.GetPosition(_compositionView);
+        var scale = VisualTreeHelper.GetDpi(_compositionView).DpiScaleX;
+        var pt = new System.Drawing.Point((int)(p.X * scale), (int)(p.Y * scale));
+
+        var send = _sendMouseInput ??= typeof(WebView2CompositionControl).GetMethod(
+            "SendMouseInput",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
+            null,
+            new[] { typeof(CoreWebView2MouseEventKind), typeof(CoreWebView2MouseEventVirtualKeys), typeof(uint), typeof(System.Drawing.Point) },
+            null);
+
+        if (send is null)
+        {
+            _runLog?.Append("[strip] SendMouseInput 反射未找到，放弃转发鼠标事件");
+            return;
+        }
+
+        try
+        {
+            send.Invoke(_compositionView, new object[] { kind, keys, 0u, pt });
+        }
+        catch (System.Reflection.TargetInvocationException ex)
+        {
+            _runLog?.Append($"[strip] SendMouseInput 转发抛异常：{ex.InnerException?.GetType().Name}: {ex.InnerException?.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 把一次"点按"转发进页面：Move（定位）→ LeftButtonDown → LeftButtonUp。
+    /// 先 Move 是因为合成宿主顶部被 DragStrip 盖住，其 OnMouseMove 没收到这次移动，
+    /// 浏览器侧"最近光标"可能陈旧。virtualKeys 对齐 Win32 MK_*：Move 无按键、
+    /// Down/Up 左键按下（WM_LBUTTONUP 仍带 MK_LBUTTON）。
+    /// </summary>
+    private void ForwardClickToPage()
+    {
+        SendMouseEvent(CoreWebView2MouseEventKind.Move, CoreWebView2MouseEventVirtualKeys.None);
+        SendMouseEvent(CoreWebView2MouseEventKind.LeftButtonDown, CoreWebView2MouseEventVirtualKeys.LeftButton);
+        SendMouseEvent(CoreWebView2MouseEventKind.LeftButtonUp, CoreWebView2MouseEventVirtualKeys.LeftButton);
+    }
+
+    /// <summary>
+    /// 把左键按下交给系统标题栏拖动（WM_NCLBUTTONDOWN + HTCAPTION）。
+    /// 为什么不用 <c>Window.DragMove()</c>：
+    /// <list type="bullet">
+    /// <item>最大化时 <c>DragMove</c> 既不会还原也不会移动 —— 顶栏拖动在最大化态直接失灵；</item>
+    /// <item>它跟手性差，且不参与系统的 Aero 吸附 / 拖动还原语义。</item>
+    /// </list>
+    /// 本窗口保留了 <c>WS_CAPTION</c>（见构造函数注释），所以系统能接住这个 hit-test 并接管整个
+    /// 拖拽循环。由此免费得到两件原生能力：<b>最大化时往下拖会还原并跟随光标</b>（README「拖动」特性），
+    /// 以及<b>拖到屏幕边缘的 Aero 吸附</b>。OS 主循环会自己调用 <c>SetCapture</c>/释放，
+    /// 这里不需要手动捕获。
+    /// <para>
+    /// 依赖 WS_CAPTION：退路的 <c>DSH_WINDOW_STYLE=none</c> 模式没有它，此消息不会进入系统拖动循环
+    /// （该模式本就不追求原生动画/吸附，属已知取舍）。
+    /// </para>
+    /// </summary>
+    private void BeginWindowDrag()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        // 取物理像素的全局光标位置：native WM_NCLBUTTONDOWN 的 lParam 就是物理屏幕坐标，
+        // 不经过 WPF 的 DIP 换算（高 DPI 下 PointToScreen 拿到的是 DIP，直接套会偏位）。
+        if (!GetCursorPos(out var pt))
+            return;
+
+        // lParam：低 16 位 = x，高 16 位 = y。都取 16 位有符号值：多点屏上坐标可为负，
+        // 低字转成有符号才不丢符号（见 WM_NCLBUTTONDOWN 文档）。
+        var lParam = (pt.Y & 0xFFFF) << 16 | (pt.X & 0xFFFF);
+
+        // 关键：必须在左键仍处于按下状态、且鼠标捕获还在本窗口时发送，
+        // 系统才认得这是一次"标题栏按下"。同帧内同步投递，等值就好。
+        SendMessage(hwnd, WmNcLButtonDown, HTCaption, lParam);
+    }
+
+    private const int WmNcLButtonDown = 0x00A1;
+    private const int HTCaption = 0x02;
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out NativePoint pt);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
     }
 
     // ---- 最大化 / 最小化 / 还原 ----
