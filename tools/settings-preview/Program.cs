@@ -18,20 +18,17 @@ namespace SettingsPreview;
 /// <remarks>
 /// Run: <c>dotnet run --project tools/settings-preview -c Debug -- &lt;out.png&gt; [light|dark] [follow|needs-token]</c>
 /// <para>
-/// The third argument selects an interesting session/appearance state: <c>follow</c> checks the
-/// 「跟随主题」box, <c>needs-token</c> drives the session into NeedsToken so the temp-URL panel shows.
+/// The third argument picks a session/appearance state: <c>follow</c> checks the 「跟随主题」box,
+/// <c>needs-token</c> drives the session into NeedsToken so the temp-URL panel shows.
 /// </para>
 /// <para>
-/// Why render the whole window rather than trust the XAML: the 2026-09-14 passes moved the console
-/// card to the top of the scroll region and folded the URL field and temp-URL panel into it.
-/// Reading the XAML tells you the markup is plausible; only a render tells you the rows still line
-/// up and that no renamed key broke a DynamicResource at load time.
+/// Render rather than read the XAML: only a render proves the rows still line up and that no
+/// renamed key broke a DynamicResource at load time.
 /// </para>
 /// <para>
-/// Windows PowerShell 5.1 is on .NET Framework and cannot load this net8.0-windows assembly at
-/// all, so the harness has to be a real WPF app — same conclusion as tools/picker-preview.
-/// The window is placed far offscreen before <c>Show()</c>: it must genuinely be shown for the
-/// template and DynamicResource lookups to resolve, but it must never flash on the desktop.
+/// Windows PowerShell 5.1 runs on .NET Framework and cannot load this net8.0-windows assembly,
+/// so the harness has to be a real WPF app. The window is placed far offscreen before <c>Show()</c>:
+/// it must be shown for template/DynamicResource lookups to resolve, but must never flash on screen.
 /// </para>
 /// </remarks>
 internal static class Program
@@ -42,41 +39,24 @@ internal static class Program
         var outFile = args.Length > 0 ? args[0] : Path.Combine(Path.GetTempPath(), "settings-preview.png");
         var dark = args.Length > 1 && args[1].Equals("dark", StringComparison.OrdinalIgnoreCase);
 
-        // Use the REAL App class, not a bare Application: every style SettingsWindow references
-        // (SectionCardStyle, SettingsTextBoxStyle, PrimaryButtonStyle, ...) lives in App.xaml, and
-        // merging a different ResourceDictionary would not bring those keys along. Constructing App
-        // runs App.xaml's InitializeComponent, which populates Application.Resources.
+        // Use the REAL App class: every style SettingsWindow references lives in App.xaml, and
+        // merging a different ResourceDictionary would not bring those keys along.
         //
-        // OnStartup DOES run — just not when you'd expect. Application's constructor posts the
-        // startup operation to the Dispatcher; without Run() it still fires at the FIRST pump,
-        // which here would be the Invoke(Loaded) after window.Show(). Before the guard existed
-        // that OnStartup applied the SYSTEM theme (this box: light) over our requested dark
-        // dictionary, loaded config.json and constructed + Show()ed a real MainWindow with a
-        // full WebView2 init — every dark render failed and light renders "passed" only because
-        // the system theme coincided with the requested one. Two-part fix:
-        //   1. App.OnStartup returns early under DSH_DESKTOP_PREVIEW=1 (set here, before new App())
-        //      after applying the system theme, skipping log/config/MainWindow entirely;
-        //   2. we pump once right after InitializeComponent to CONSUME that posted startup now,
-        //      so our own theme swap below happens after OnStartup and nothing reverts it later.
+        // OnStartup does run, at the FIRST pump rather than at construction. Before the guard
+        // existed it applied the SYSTEM theme over our requested one and spun up a real MainWindow
+        // with a full WebView2 init. Two-part fix: (1) App.OnStartup returns early under
+        // DSH_DESKTOP_PREVIEW=1, (2) we pump once below to CONSUME that posted startup now, so our
+        // theme swap happens after OnStartup and nothing reverts it later.
         Environment.SetEnvironmentVariable("DSH_DESKTOP_PREVIEW", "1");
         var app = new App { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         app.InitializeComponent();
-        // Consume the posted startup NOW: OnStartup (guard mode) applies the system theme, and it
-        // must have happened BEFORE the swap below, or the swap gets overwritten at the next pump.
+        // Consume the posted startup now, or the swap below gets overwritten at the next pump.
         app.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
 
         // App.xaml merges Themes/Dark.xaml at InitializeComponent time as a design-time default.
-        // We need the *requested* theme, so remove that entry and append ours.
-        //
-        // Two earlier attempts failed in ways worth recording, because both LOOK like success:
-        //   * Clear() + Add()  -> Application.Resources read the new colours, but the window still
-        //     resolved the old ones. Swapping a merged dictionary does not re-invalidate values
-        //     the visual tree already resolved.
-        //   * Insert(0, ...)   -> inconsistent: WindowBackgroundBrush came from the new dictionary
-        //     while TextBrush still came from Dark.xaml, so a "dark" and a "light" render differed
-        //     by only some of their colours.
-        // Removing the old entry by Source (the /Themes/ marker ThemeSwitcher also keys off) and
-        // appending the replacement leaves exactly one theme dictionary, so precedence is moot.
+        // Remove that entry by Source (the /Themes/ marker ThemeSwitcher also keys off) and append
+        // ours, leaving exactly one theme dictionary. Clear()+Add() fails to re-resolve values the
+        // visual tree already resolved; Insert(0,...) leaves a mix of both dictionaries.
         var dictionaries = app.Resources.MergedDictionaries;
         for (var i = dictionaries.Count - 1; i >= 0; i--)
         {
@@ -89,12 +69,9 @@ internal static class Program
             Source = new Uri($"pack://application:,,,/Themes/{(dark ? "Dark" : "Light")}.xaml", UriKind.Absolute),
         });
 
-        // Prove the swap actually took, by comparing against the LITERAL the theme file declares.
-        //
-        // Do NOT compare window.FindResource(...) against app.Resources[...]: a consistently-wrong
-        // theme (e.g. Dark requested, Light loaded) makes both return the same wrong value, so that
-        // comparison passes while the render is obviously wrong. These literals come from
-        // Themes/Dark.xaml and Themes/Light.xaml; if a theme's palette changes, update them here.
+        // Compare against the LITERAL the theme file declares. Do NOT compare FindResource against
+        // app.Resources: a consistently-wrong theme makes both return the same wrong value and the
+        // check would pass. If a theme's palette changes, update these.
         var expectedWindowBg = dark ? Color.FromRgb(0x1E, 0x1E, 0x1E) : Colors.White;
         var expectedText = dark ? Color.FromRgb(0xE8, 0xE8, 0xE8) : Color.FromRgb(0x1A, 0x1A, 0x1A);
 
@@ -111,26 +88,22 @@ internal static class Program
             return 3;
         }
 
-        // A config with a non-empty background so the checkbox renders UNCHECKED and the color
-        // picker beside it is enabled — that is the state worth looking at, since the checked
-        // state is just one checkbox with the picker greyed out.
-        // The third arg is a comma-separated state list; "follow" is applied LIVE after Show()
-        // (see below) so the render exercises the real INPC → Visibility path, not initial state.
+        // A non-empty background so the checkbox renders UNCHECKED and the picker beside it is
+        // enabled — the checked state is just one checkbox with the picker greyed out.
+        // The third arg is a comma-separated state list, applied LIVE after Show() (see below) so
+        // the render exercises the real INPC → Visibility path, not initial state.
         var modes = args.Length > 2
             ? args[2].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             : Array.Empty<string>();
         var wants = (string name) => modes.Contains(name, StringComparer.OrdinalIgnoreCase);
 
-        // "main" renders the real MainWindow (real WebView2 + real session machinery) to check the
-        // startup loading overlay: visible while probing/navigating, hidden once the real
-        // navigation completes. Runs before the SettingsWindow flow — it returns directly.
+        // "main" renders the real MainWindow (real WebView2 + session machinery) to check the
+        // startup loading overlay. Runs before the SettingsWindow flow.
         if (wants("main"))
             return RenderMain(app, outFile);
 
-        // "needs-token" drives the session into NeedsToken so the temp-URL panel is visible.
-        // Forced by running a real probe that answers 401 — there is no way to set Phase directly
-        // (its setter is private), and faking it would not prove the panel's actual visibility
-        // binding works. This is also the exact path the user's screenshot came from.
+        // "needs-token" forces a real 401 probe: Phase's setter is private and faking it would not
+        // prove the panel's visibility binding works.
         var needsToken = wants("needs-token");
 
         var config = AppConfig.CreateDefault() with
@@ -143,32 +116,19 @@ internal static class Program
         IEndpointProbe probe = needsToken ? new UnauthorizedProbe() : new NopProbe();
         var session = new SessionViewModel(probe, new NopLauncher());
 
-        // Seed the console so the two clear buttons are shown above real-looking output rather
-        // than an empty box — the header row is what we are inspecting.
+        // Seed the console so the two clear buttons show above real-looking output, not an empty box.
         session.Note("已清除 WebView2 的全部 Cookie（页面需刷新后才会体现为登出）");
         session.Note("正在清除 WebView 数据（缓存 / 存储 / Cookie 等）…");
 
-        // The window is created BEFORE the session runs, and the session is started only after
-        // Show(). Realism first: the live app opens the settings window when the session hits
-        // NeedsToken, so starting the session after the window exists exercises the LIVE
-        // NeedsTokenVisibility update path (phase change → window's PropertyChanged → panel
-        // appears) — the path whose absence (SettingsWindow never implemented
-        // INotifyPropertyChanged) this harness caught on 2026-09-14: with only a same-named
-        // event declared, WPF bindings never subscribed and the "panel appeared" render was
-        // byte-identical to the "nothing changed" render.
-        //
-        // (Historical note: an earlier harness revision started the session before creating the
-        // window and saw the post-session window render in the wrong theme, "mechanism
-        // unexplained". That mystery was the deferred OnStartup: it ran at the first pump and
-        // ApplyFromSystem stomped the requested dictionary with the system theme — nothing to do
-        // with session ordering. With the preview guard + the early startup pump above, ordering
-        // is theme-neutral again; the realistic order is kept.)
-
+        // The window is created BEFORE the session runs, and the session starts only after Show():
+        // the live app opens this window when the session hits NeedsToken, so this order exercises
+        // the live NeedsTokenVisibility update path (phase change → window's PropertyChanged → panel
+        // appears) — the path whose absence (SettingsWindow never implementing INotifyPropertyChanged)
+        // this harness caught on 2026-09-14.
         var window = new SettingsWindow(vm, session)
         {
             Width = 660,
             // Tall enough to reach the console card, whose header carries the two clear buttons.
-            // A shorter window leaves them below the fold and the render shows only the first cards.
             Height = 1280,
             Left = -4000,
             Top = -4000,
@@ -181,10 +141,9 @@ internal static class Program
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
         window.UpdateLayout();
 
-        // Apply the appearance states LIVE, after the window is shown: each one flips a
-        // SettingsViewModel property and the render only looks right if the new
-        // INPC → Visibility bindings actually collapse the dependent blocks at runtime.
-        // (Setting them in the config instead would only prove the initial layout.)
+        // Apply the appearance states LIVE, after Show(): each flips a SettingsViewModel property,
+        // and the render only looks right if the INPC → Visibility bindings collapse the dependent
+        // blocks at runtime. Setting them in the config would only prove the initial layout.
         if (wants("follow"))
             vm.ChromeButtonBackgroundFollowTheme = true;
         if (wants("never-start"))
@@ -197,22 +156,18 @@ internal static class Program
             window.UpdateLayout();
         }
 
-        // Now that the window exists (see the ordering note above), drive the session so the
-        // temp-URL panel appears through the live binding, not through initial state.
+        // Drive the session now that the window exists, so the temp-URL panel appears through the
+        // live binding rather than through initial state.
         if (needsToken)
         {
             session.StartSessionAsync(config, CancellationToken.None).GetAwaiter().GetResult();
             Console.WriteLine($"[session] phase={session.Phase} error={session.ErrorMessage}");
-            // NeedsToken flips NeedsTokenVisibility via the window's PropertyChanged; give the
-            // queued layout pass a chance to run before we measure and render.
             window.Dispatcher.Invoke(() => { }, DispatcherPriority.Loaded);
             window.UpdateLayout();
         }
 
-        // Read the brush the ROOT GRID is actually painting with, not just what FindResource would
-        // return. The root Grid's Background is a DynamicResource, and DynamicResource resolution on
-        // a live visual tree is what determines the pixels — so this is the only check that proves
-        // the render will come out in the requested theme.
+        // Read the brush the ROOT GRID actually paints with, not what FindResource returns:
+        // DynamicResource resolution on a live visual tree is what determines the pixels.
         var rootGrid = (Panel)window.Content;
         var actualBg = ((SolidColorBrush)rootGrid.Background).Color;
         Console.WriteLine($"[window] root.Background=#{actualBg.R:X2}{actualBg.G:X2}{actualBg.B:X2} "
@@ -228,10 +183,9 @@ internal static class Program
             return 2;
         }
 
-        // Show the TOP of the scroll region. The console card — the one this pass moved to first
-        // place, with the URL field and the temp-URL panel inside it — lives there, so scrolling
-        // anywhere else would render exactly the region we are NOT inspecting.
-        // (Before the reorder this said ScrollToEnd; the direction follows the card's position.)
+        // Show the TOP of the scroll region, where the console card (with the URL field and the
+        // temp-URL panel inside it) lives — scrolling elsewhere renders the region we are NOT
+        // inspecting. This said ScrollToEnd before the reorder.
         if (FindScrollViewer(window) is { } scroller)
         {
             scroller.ScrollToTop();
@@ -265,8 +219,7 @@ internal static class Program
         return 0;
     }
 
-    /// <summary>Depth-first search for the settings body's ScrollViewer (it has no x:Name, and naming it
-    /// would mean touching shipping XAML purely for a dev tool).</summary>
+    /// <summary>Depth-first search for the settings body's ScrollViewer (unnamed; naming it would mean touching shipping XAML for a dev tool).</summary>
     private static ScrollViewer? FindScrollViewer(DependencyObject root)
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
@@ -284,13 +237,13 @@ internal static class Program
     /// <summary>
     /// Renders the real <see cref="MainWindow"/> offscreen to verify the startup loading overlay:
     /// <list type="bullet">
-    /// <item>Phase A — a default URL that HANGS (non-routable 10.255.255.1) with S2: the probe
-    /// stays in flight for its 10s timeout, so the overlay must still be VISIBLE at capture time.</item>
-    /// <item>Phase B — a second window with a refused URL (127.0.0.1:3080) and S1 (direct
-    /// navigate): the navigation fails within milliseconds, so by ~3s the overlay must be GONE.</item>
+    /// <item>Phase A — a URL that HANGS (non-routable 10.255.255.1): the probe stays in flight for
+    /// its 10s timeout, so the overlay must still be VISIBLE at capture time.</item>
+    /// <item>Phase B — a refused URL (127.0.0.1:3080) with direct navigate: the navigation fails
+    /// within milliseconds, so by ~3s the overlay must be GONE.</item>
     /// </list>
-    /// Real infra (WebViewProbe / CommandLauncher / ConfigStore) is used because MainWindow wires
-    /// them in its constructor; everything writes into a scratch dir that is deleted on the way out.
+    /// Real infra is used because MainWindow wires it in its constructor; everything writes into a
+    /// scratch dir deleted on the way out.
     /// </summary>
     private static int RenderMain(App app, string outFile)
     {
@@ -446,10 +399,7 @@ internal static class Program
         Console.WriteLine($"[main] saved {path} ({w}x{h})");
     }
 
-    /// <summary>
-    /// Answers 401 so <c>ProbeThenStart</c> resolves to <c>OpenConfigForToken</c> and the session
-    /// lands in <c>NeedsToken</c> — the exact state that makes the temp-URL panel visible.
-    /// </summary>
+    /// <summary>Answers 401 so <c>ProbeThenStart</c> resolves to <c>OpenConfigForToken</c> and the session lands in <c>NeedsToken</c> — the state that makes the temp-URL panel visible.</summary>
     private sealed class UnauthorizedProbe : IEndpointProbe
     {
         public Task<ProbeResult> ProbeAsync(string url, CancellationToken ct) =>

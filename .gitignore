@@ -52,3 +52,5 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 .dsh/
+tests/run-tests.ps1
+tests/Runner

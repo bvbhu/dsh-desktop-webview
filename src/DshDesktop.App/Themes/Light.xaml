@@ -27,8 +27,7 @@
     <SolidColorBrush x:Key="AccentBrush" Color="#0A84FF" />
     <SolidColorBrush x:Key="AccentHoverBrush" Color="#3D9BFF" />
 
-    <!-- PixiEditor 颜色选择器在本主题下不套任何覆盖（空样式 = 它自带的 WPF 原生浅色外观，
-         离线渲染确认过：白底上的浅色色相环/滑轨/数值框都正常）。
-         这个键必须存在 —— 控件是用 DynamicResource 引用它的，换主题时靠 Dark.xaml 里那份生效。 -->
+    <!-- PixiEditor 颜色选择器在本主题下不套覆盖（空样式 = 自带 WPF 原生浅色外观）。此键必须存在，
+         控件用 DynamicResource 引用它，换主题时靠 Dark.xaml 里那份生效。 -->
     <Style x:Key="ColorPickerHostStyle" TargetType="UserControl" />
 </ResourceDictionary>

@@ -2,49 +2,35 @@ name: build-portable
 
 # 便携版自动构建。
 #
-# 触发：每次 push 到 main、以及手动 dispatch（workflow_dispatch）。
-# 产物：Actions Artifacts 里的两个平铺 zip —— 依赖框架版 + 自包含版。
-#       不创建 Release（本项目暂不签名，正式发布渠道留待签名方案确定后再开）。
-# 保留：只保留最新一次构建，旧的 artifact 在构建成功后被自动删除。
+# 触发：push 到 main，或手动 dispatch。
+# 产物：Artifacts 里的两个平铺 zip（依赖框架版 + 自包含版）。不创建 Release（尚未签名）。
+# 保留：只保留最新一次构建，旧的 artifact 在构建成功后被删除。
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# 同一分支上的新提交会取消上一次还在跑的构建 —— 中间态没有留存价值。
 concurrency:
   group: build-portable-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
-  actions: write # 删除本仓库的旧 artifact 需要写权限
+  actions: write
 
 env:
-  # 与 publish.ps1 的默认值保持一致：win-x64 + Release。
   CONFIGURATION: Release
   RUNTIME: win-x64
-  # NUGET_PACKAGES 刻意**不**放这里：工作流级 env 只允许 github / secrets /
-  # inputs / vars 四个上下文，引用 runner.* 会被 GitHub 判为
-  # "Unrecognized named-value: 'runner'" 并直接拒绝整个工作流文件（连解析都过不去）。
-  # 它逐步骤写在各 dotnet 步骤的 env 里 —— 只有 steps.env 这一层允许 runner 上下文。
-  #
-  # SHA_SHORT（真正的 7 位短 sha）不在这里定义：github.sha 没有短形式，
-  # 需要截断，而截断只能在 shell 里做。见 build job 的 "Resolve short sha" 步骤。
 
 jobs:
   build:
     runs-on: windows-latest
 
     strategy:
-      # 一个模式失败时仍然把另一个跑完 —— 两个包各自独立，不该互相拖累。
       fail-fast: false
       matrix:
         include:
-          # dist  = 压缩包名（也是 Artifacts 列表里的名字），不带 sha 后缀，
-          #         sha 在 workflow 末尾统一拼上，避免两处各写一遍。
-          # folder= 解压后用户看到的文件夹名；压缩包里只有这一个顶层文件夹。
           - mode: framework
             self_contained: "false"
             dist: DSH-Desktop-View
@@ -58,13 +44,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # github.sha 是完整 40 位，且没有内置的短形式；压缩包名只需要 7 位。
-      # 截断只能在 shell 里做（matrix 定义处不支持字符串函数），所以放在这里，
-      # 写进 $GITHUB_ENV 供本 job 后续步骤用 $env:SHA_SHORT 读取。
-      #
-      # 刻意不走 job outputs 传给 cleanup：build 是 matrix job，两条腿都会写
-      # 同一个 output，语义含糊（谁最后跑完算谁的）。cleanup 自己算一次更干脆
-      # —— 它拿到的是同一次 workflow run 的 github.sha，结果必然一致。
       - name: Resolve short sha
         shell: pwsh
         run: |
@@ -80,41 +59,21 @@ jobs:
       - name: Cache NuGet packages
         uses: actions/cache@v4
         with:
-          # 必须与下面各 dotnet 步骤的 NUGET_PACKAGES 是同一个绝对路径。
           path: ${{ runner.temp }}\nuget-packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
           restore-keys: |
             nuget-${{ runner.os }}-
 
-      # TreatWarningsAsErrors=true，所以这一步顺带就是"0 警告"门禁。
-      # 这里刻意不带 -r：发布才是 RID 相关的，先做一次与 RID 无关的干净编译。
-      #
-      # NUGET_PACKAGES 必须逐个步骤写：runner 上下文只在
-      # jobs.<job_id>.steps.env 这一层可用，工作流级 env 和 job 级 env 都会
-      # 被 GitHub 判为 "Unrecognized named-value: 'runner'" 而拒绝整个文件。
       - name: Build (0 warnings gate)
         env:
           NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
         run: dotnet build DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
 
-      # 不带 --no-build：让 test 自己按需编译。上面那次 build 没带 RID，
-      # 而 publish 会带 RID，两者的输出路径/中间产物并不共用；靠 --no-build
-      # 去复用很容易在 RID 组合上踩空，让测试莫名其妙地找不到程序集。
       - name: Test
         env:
           NUGET_PACKAGES: ${{ runner.temp }}\nuget-packages
         run: dotnet test DSH-Desktop-Webview.sln -c $env:CONFIGURATION --nologo
 
-      # 与 publish.ps1 同一条命令、同一套校验，只是输出目录换成干净路径：
-      # CI runner 上不存在"运行中的实例锁住 exe / 需要保留运行期数据"的问题，
-      # 所以不用调 publish.ps1（它还会强删目录、等回车）。
-      #
-      # 两种模式都出（大小是压缩后 zip 的实测值）：
-      #   framework / DSH-Desktop-View          依赖框架版，约 7 MB，
-      #                                          目标机需装 .NET 8 桌面运行时
-      #   selfcontained / DSH-Desktop-View-with-net
-      #                                          自包含版，约 75 MB，
-      #                                          目标机无需装 .NET
       - name: Publish portable (${{ matrix.mode }})
         shell: pwsh
         env:
@@ -126,9 +85,6 @@ jobs:
             -o "artifacts/${{ matrix.mode }}" --nologo
           if ($LASTEXITCODE -ne 0) { throw "dotnet publish 退出码 $LASTEXITCODE" }
 
-      # publish.ps1 的校验 2 / 校验 4。校验 3（exe 新鲜度）在干净 runner 上
-      # 没有意义，这里不搬。校验 4 是必须的：缺 Microsoft.Windows.SDK.NET.dll
-      # 时合成宿主会静默降级到 hwnd。
       - name: Verify artifact (${{ matrix.mode }})
         shell: pwsh
         run: |
@@ -141,13 +97,12 @@ jobs:
             throw "产物缺少 Microsoft.Windows.SDK.NET.dll —— 合成宿主会初始化失败并回退到 hwnd"
           }
 
-          # CI 产物必须是"纯程序":运行期数据只会在用户机器上生成。
+          # CI 产物必须是「纯程序」：运行期数据只会在用户机器上生成。
           foreach ($name in @("config.json", "run.log", "WebView2Profile", "temp")) {
             if (Test-Path (Join-Path $out $name)) { throw "产物里混入了运行期数据: $name" }
           }
 
-          # 自包含版必须真的带上运行时，否则等于发了个装不上运行时的包：
-          # 目标机上会直接报"找不到 .NET 运行时"。coreclr.dll 是运行时本体。
+          # 自包含版必须真的带上运行时，否则目标机会直接报「找不到 .NET 运行时」。coreclr.dll 是运行时本体。
           if ("${{ matrix.self_contained }}" -eq "true") {
             if (-not (Test-Path (Join-Path $out "coreclr.dll"))) {
               throw "自包含版缺少 coreclr.dll —— 运行时没有真正打进产物"
@@ -160,13 +115,11 @@ jobs:
       - name: Package zip (${{ matrix.mode }})
         shell: pwsh
         run: |
-          # 先压好再上传：upload-artifact 自己也会打一层 zip，用户会拿到
-          # "zip 里套 zip"。这里显式产出一个可直接解压使用的压缩包。
+          # 先压好再上传：upload-artifact 自己也会打一层 zip，用户会拿到「zip 里套 zip」。
           #
-          # 压缩包内必须只有一个顶层文件夹 "DSH Desktop View"（用户解压即得
-          # 一个干净的目录，不会把几十个 dll 散落一地）。注意
-          # Compress-Archive -Path "dir/*" 会把内容平铺到压缩包根部，
-          # 所以先把产物搬进同名的暂存目录，再压缩**目录本身**（不带 /*）。
+          # 压缩包内必须只有一个顶层文件夹（用户解压即得干净目录）。注意
+          # Compress-Archive -Path "dir/*" 会把内容平铺到根部，所以先搬进同名暂存目录，
+          # 再压缩目录本身（不带 /*）。
           $stage = "stage/${{ matrix.folder }}"
           New-Item -ItemType Directory -Path $stage -Force | Out-Null
           Copy-Item -Path "artifacts/${{ matrix.mode }}/*" -Destination $stage -Recurse -Force
@@ -198,18 +151,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # 清理必须单独成一个 job：matrix 的两条腿是并行跑的，如果各自在结尾做清理，
-  # 它们会互相把对方刚上传的 artifact 删掉（先跑完的那条会看到另一条是"旧的"）。
-  # needs: build 保证两个包都上传完再动手。
   cleanup:
     needs: build
     if: success()
     runs-on: windows-latest
 
     steps:
-      # 只保留最新一次构建：删掉除本次以外的所有 artifact。
-      # 用 runner 自带的 gh CLI（GitHub Hosted Runner 预装），避免再引一个
-      # 第三方 action 当供应链依赖。
+      # 只保留最新一次构建。用 runner 预装的 gh CLI，避免再引一个第三方 action 当供应链依赖。
       - name: Delete older artifacts
         shell: pwsh
         env:
@@ -217,13 +165,11 @@ jobs:
         run: |
           $repo = "${{ github.repository }}"
 
-          # 短 sha 在这里重新算一遍：它与 build job 用的是同一个 github.sha，
-          # 结果必然一致；这样就不必让 matrix job 往外传 output（语义含糊）。
+          # 短 sha 重新算一遍：与 build job 用的是同一个 github.sha，结果必然一致。
           $env:SHA_SHORT = "${{ github.sha }}".Substring(0, 7)
 
-          # 本次构建的两个包都算"当前"，都要留。
-          # 名字必须与 build job 的 upload-artifact 完全一致，否则会把刚上传的
-          # 产物当"旧的"删掉。cleanup 与 build 是两个独立 job，无法共享 matrix，
+          # 本次构建的两个包都算「当前」，都要留。名字必须与 build job 的 upload-artifact
+          # 完全一致，否则会把刚上传的产物当「旧的」删掉；cleanup 与 build 无法共享 matrix，
           # 所以这里只能重写一遍 —— 改动命名时两处都要改。
           if ([string]::IsNullOrWhiteSpace($env:SHA_SHORT)) {
             throw "SHA_SHORT 为空，拒绝清理 —— 否则会把刚上传的产物全部误删"

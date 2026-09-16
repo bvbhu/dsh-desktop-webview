@@ -1,11 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Offscreen render harness for UI eyeballing.
-       Why a separate WPF project instead of a PowerShell script: the control lives in a
-       net8.0-windows assembly, and Windows PowerShell 5.1 runs on .NET Framework and
-       cannot load it at all ("could not load PresentationFramework 8.0.0.0").
-       A net8.0-windows host has no such problem.
-       This project is under /tools and is NOT part of the solution, so it never ships. -->
+  <!-- Offscreen render harness for UI eyeballing. Must be a WPF project: the control lives in a
+       net8.0-windows assembly, which Windows PowerShell 5.1 (.NET Framework) cannot load.
+       Under /tools and NOT in the solution, so it never ships. -->
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -19,8 +16,7 @@
 
   <ItemGroup>
     <!-- Reference the real app so the preview renders the real control, not a copy.
-         Private=true: the harness must deploy DSH-Desktop-Webview.dll next to itself,
-         otherwise it dies at startup with FileNotFoundException on that assembly. -->
+         Private=true: deploy DSH-Desktop-Webview.dll beside the harness or it dies at startup. -->
     <ProjectReference Include="..\..\src\DshDesktop.App\DshDesktop.App.csproj">
       <Private>true</Private>
     </ProjectReference>

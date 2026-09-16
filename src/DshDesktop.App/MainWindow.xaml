@@ -44,14 +44,11 @@
                 <RowDefinition Height="*" />
             </Grid.RowDefinitions>
 
-            <!-- 浮层：三个同级元素，互不为祖先，避免点击事件向上冒泡到拖动处理器
-                 （否则点关闭键会同时触发窗口拖动）。
-                 Panel.ZIndex=2：合成版宿主会跨满两行铺在下面，浮层必须浮在它之上；
-                 且必须高于加载浮层的 ZIndex=1 —— 启动加载期间三键要可点、拖动条要可拖
-                 （层级约定：窗口控制按钮 > 拖动条 > 加载浮层 > 宿主）。 -->
+            <!-- 浮层：三个同级元素互不为祖先，避免点击事件冒泡到拖动处理器（否则点关闭键会同时拖动窗口）。
+                 Panel.ZIndex=2 必须高于加载浮层的 ZIndex=1 —— 启动加载期间三键要可点、拖动条要可拖。
+                 （层级约定：窗口控制按钮 > 拖动条 > 加载浮层 > 宿主。） -->
             <Grid Grid.Row="0" Panel.ZIndex="2">
-                <!-- 整条顶栏的拖动面兼底色。composition 模式下代码会把它 Collapsed：
-                     那时整窗都是页面，只剩可配置的 DragStrip 与三键浮层（§7.1、§7.3）。
+                <!-- 整条顶栏的拖动面与底色。Composition 模式下代码会把它 Collapsed（那时整窗都是页面）；
                      保留它是因为 hwnd 模式下这一条是唯一可拖动的地方。 -->
                 <Border x:Name="TopBar"
                         Background="{DynamicResource WindowBackgroundBrush}"

@@ -6,16 +6,10 @@ namespace DshDesktop.Application;
 
 public sealed class SettingsViewModel : ViewModelBase
 {
-    /// <summary>
-    /// 取消勾选「跟随主题」时给一个立即可见的白底 —— 详见
-    /// <see cref="ChromeButtonBackgroundFollowTheme"/> 的说明。
-    /// </summary>
+    /// <summary>取消勾选「跟随主题」时给一个立即可见的白底，详见 <see cref="ChromeButtonBackgroundFollowTheme"/>。</summary>
     private const string DefaultChromeButtonBackground = "#FFFFFF";
 
-    /// <summary>
-    /// 上次保存（或启动时加载）的配置，作为「取消」的回退基线。
-    /// 不是 readonly：保存成功时必须推进基线，否则「取消」会回退到启动时的旧值。
-    /// </summary>
+    /// <summary>上次保存（或加载）的配置，作为「取消」的回退基线；保存成功后必须推进。</summary>
     private AppConfig _snapshot;
 
     private string _defaultUrl;
@@ -44,16 +38,12 @@ public sealed class SettingsViewModel : ViewModelBase
         set
         {
             Set(ref _serviceStrategy, value);
-            // 派生视图跟着刷：选了「不启动」就要实时藏起启动配置（见 ServiceNeverStart）
+            // 派生视图跟着刷：选「不启动」要实时藏起启动配置
             Raise(nameof(ServiceNeverStart));
         }
     }
 
-    /// <summary>
-    /// 是否选择了「不启动，直接打开url」。为 true 时启动策略卡片里的
-    /// 工作目录 / 启动命令 / 两个正则整块实时隐藏 —— 不启动服务就没有可配置的启动参数，
-    /// 留着只会让人误以为它们还有效。
-    /// </summary>
+    /// <summary>是否「不启动，直接打开url」。为 true 时启动策略卡片里的工作目录 / 启动命令 / 两个正则整块隐藏。</summary>
     public bool ServiceNeverStart => _serviceStrategy == ServiceStrategy.NeverStart;
 
     public string LaunchCommand { get => _launchCommand; set => Set(ref _launchCommand, value); }
@@ -68,23 +58,15 @@ public sealed class SettingsViewModel : ViewModelBase
         set
         {
             Set(ref _chromeButtonBackground, value);
-            // 「跟随主题」复选框是这个字段的派生视图，字段一动它就得跟着刷新
+            // 「跟随主题」是派生视图，字段一动就得刷新
             Raise(nameof(ChromeButtonBackgroundFollowTheme));
         }
     }
 
     /// <summary>
-    /// 「窗口控制按钮 底色」是否跟随主题 —— 即 <see cref="ChromeButtonBackground"/> 是否为空。
-    /// <para>
-    /// 为什么做成派生属性而不是再存一个 bool 字段：底色的"留空 = 跟随主题"这条语义
-    /// 由 <see cref="AppConfig.ChromeButtonBackground"/> 单独承载（<c>ChromeBar.Configure</c> 就是
-    /// 按空/非空二分来决定 ClearValue 还是设本地值的）。多存一个 bool 就多一处可能不同步的状态，
-    /// 迟早会出现"勾了选框但底色还在"这类幽灵配置。
-    /// </para>
-    /// <para>
-    /// 取消勾选时给 <c>#FFFFFF</c> 而不是留空：留空等于又回到跟随主题，复选框会立刻弹回去，
-    /// 用户会觉得点不动。给一个具体的白底，用户再点「选择颜色」去改。
-    /// </para>
+    /// 「三键底色」是否跟随主题 —— 即 <see cref="ChromeButtonBackground"/> 是否为空。
+    /// 做成派生属性而非另存 bool：底色的「留空 = 跟随主题」语义已由 <see cref="AppConfig.ChromeButtonBackground"/> 单独承载，
+    /// 多存一个 bool 就多一处可能不同步的状态。
     /// </summary>
     public bool ChromeButtonBackgroundFollowTheme
     {
@@ -102,7 +84,7 @@ public sealed class SettingsViewModel : ViewModelBase
     public int DragStripLeftInset { get => _dragStripLeftInset; set => Set(ref _dragStripLeftInset, value); }
     public int DragStripRightInset { get => _dragStripRightInset; set => Set(ref _dragStripRightInset, value); }
     public int DragStripHeight { get => _dragStripHeight; set => Set(ref _dragStripHeight, value); }
-    // 颜色 / 不透明度这两个属性一动，合成值 DragStripArgb 也跟着变（颜色选择器绑的是它）
+    // 颜色 / 不透明度一动，合成值 DragStripArgb 跟着变（颜色选择器绑的是它）
     public string DragStripColor
     {
         get => _dragStripColor;
@@ -124,16 +106,8 @@ public sealed class SettingsViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// 拖动层颜色 + 不透明度合成的 ARGB 值，给"能选透明度的颜色选择器"用。
-    /// <para>
-    /// 用户要求：颜色和透明度共用一个选择器、不给输入框（参考图 4 的红字批注）。
-    /// 但 <see cref="AppConfig"/> 的 <c>DragStripColor</c> / <c>DragStripOpacity</c> 两个字段
-    /// 保持不变（跨层契约不动），拆/合只发生在这对访问器里。
-    /// </para>
-    /// <para>
-    /// 非法值一律<b>原样透出</b>、不做静默修正：校验器要能看到它并报错，
-    /// 否则又是"设置疑似不生效"那一类问题（见 <c>FirstInvalidColor</c>）。
-    /// </para>
+    /// 拖动层颜色 + 不透明度合成的 ARGB，供「能选透明度的颜色选择器」使用（颜色与透明度共用一个选择器，不给输入框）。
+    /// 合成的 <see cref="AppConfig"/> 字段不变，拆/合只发生在这对访问器里；非法值原样透出，交给校验器报错。
     /// </summary>
     public string DragStripArgb
     {
@@ -154,8 +128,7 @@ public sealed class SettingsViewModel : ViewModelBase
                 return;
             }
 
-            // Set 的名字必须显式给：这里 CallerMemberName 拿到的是 DragStripArgb，
-            // 那样会发出错误的属性通知（颜色字段的绑定收不到）。
+            // 名字必须显式给：否则 CallerMemberName 发出 DragStripArgb 通知，颜色字段的绑定收不到
             Set(ref _dragStripColor, $"#{r:X2}{g:X2}{b:X2}", nameof(DragStripColor));
             Set(ref _dragStripOpacity, Math.Clamp(Math.Round(a / 255.0, 4), 0, 1), nameof(DragStripOpacity));
             Raise(nameof(DragStripArgb));
@@ -169,7 +142,7 @@ public sealed class SettingsViewModel : ViewModelBase
         ApplyConfig(config);
     }
 
-    // MemberNotNull：赋值拆到方法里后编译器看不到字段已初始化，需要显式声明（Nullable 严格模式下必须）。
+    // Nullable 严格模式下，赋值拆进方法后编译器看不到字段已初始化，需显式声明。
     [MemberNotNull(nameof(_defaultUrl), nameof(_launchCommand), nameof(_urlExtractRegex),
         nameof(_successMarkerRegex), nameof(_workingDirectory), nameof(_chromeButtonIconColor),
         nameof(_chromeButtonBackground), nameof(_dragStripColor))]
@@ -193,13 +166,10 @@ public sealed class SettingsViewModel : ViewModelBase
         _dragStripOpacity = config.DragStripOpacity;
     }
 
-    /// <summary>保存成功后把当前配置立为新基线（此后「取消」回退到这里）。</summary>
+    /// <summary>保存成功后把当前配置立为新基线。</summary>
     public void AcceptSnapshot(AppConfig config) => _snapshot = config;
 
-    /// <summary>
-    /// 放弃未保存的编辑，退回基线。
-    /// 只改内存字段，不发通知；调用方（设置窗口）负责 RaiseAll 刷新绑定。
-    /// </summary>
+    /// <summary>放弃未保存的编辑，退回基线；只改内存字段，由调用方 RaiseAll 刷新绑定。</summary>
     public void RevertToSnapshot() => ApplyConfig(_snapshot);
 
     public bool Validate()
@@ -233,14 +203,7 @@ public sealed class SettingsViewModel : ViewModelBase
         return true;
     }
 
-    /// <summary>
-    /// 颜色字段校验：空 = 跟随主题（合法）；非空则必须是十六进制。
-    /// <para>
-    /// 为什么必须校验而不是让界面自己回落：颜色解析失败时界面会静默用主题色，
-    /// 用户看到的只是"设置疑似不生效"（2026-09-13 实测踩过：<c>" #123456 "</c> 带空格就被
-    /// WPF 的 ColorConverter 抛掉）。这里把话说清楚，用户才知道该怎么改。
-    /// </para>
-    /// </summary>
+    /// <summary>颜色字段校验：空 = 跟随主题（合法），非空必须是十六进制。不校验的话界面会静默回落主题色，用户只看到「设置疑似不生效」。</summary>
     private string? FirstInvalidColor()
     {
         foreach (var (label, value) in new[]
@@ -271,7 +234,7 @@ public sealed class SettingsViewModel : ViewModelBase
             SuccessMarkerRegex = _successMarkerRegex,
             WorkingDirectory = _workingDirectory,
             ChromeButtonsDefault = _chromeButtonsDefault,
-            // 颜色落盘前 Trim：带空白的十六进制是"设置不生效"的经典来源（见 FirstInvalidColor）
+            // 落盘前 Trim：带空白的十六进制是「设置不生效」的经典来源
             ChromeButtonIconColor = _chromeButtonIconColor.Trim(),
             ChromeButtonBackground = _chromeButtonBackground.Trim(),
             ChromeHoverDelayMs = _chromeHoverDelayMs,
@@ -284,14 +247,7 @@ public sealed class SettingsViewModel : ViewModelBase
         };
     }
 
-    /// <summary>
-    /// 「重置外观」：把外观字段恢复为出厂默认值。
-    /// <para>
-    /// 取值必须与 <see cref="AppConfig.CreateDefault"/> 逐项一致 —— 外观字段散在公开 record 里，
-    /// 没法整体替换，只能逐项赋值，这份清单是它的手工副本。漏同步会让重置结果与新装默认不一致，
-    /// 由 <c>ResetAppearanceTests</c> 逐字段比对防复发。
-    /// </para>
-    /// </summary>
+    /// <summary>「重置外观」：把外观字段恢复为出厂默认值，取值须与 <see cref="AppConfig.CreateDefault"/> 逐项一致（由 ResetAppearanceTests 逐字段比对防复发）。</summary>
     public void ResetAppearance()
     {
         ChromeButtonsDefault = ChromeButtonVisibility.Shown;

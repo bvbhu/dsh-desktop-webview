@@ -3,17 +3,8 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              Width="138" Height="40">
     <Grid>
-        <!-- 悬停区域只是"逻辑占位"，**不参与命中测试**：
-             三键隐藏时它必须让点击穿透到页面（用户实测报告的问题）。
-             WPF 里"能收到 MouseEnter"和"会吃掉点击"是同一件事，没有只观察不拦截的元素，
-             因此悬停改由 ChromeBar 里的 DispatcherTimer 轮询 Mouse.GetPosition 判定。 -->
         <Border x:Name="HoverArea" Background="Transparent" IsHitTestVisible="False" />
 
-        <!-- 三键的三层图标坐标全部落在半像素上（x.5），且共用同一个包围盒
-             (0.5,0.5)-(9.5,9.5)：
-             Path 默认 Stretch=None 时元素尺寸/原点由包围盒推得，包围盒一变，
-             两个图标（最大化 / 还原）的对中基准就不同，切换时会跳位错位。
-             半像素坐标则是为了让 1px 描边正好压住一行像素，不被反锯齿糊成两行。 -->
         <StackPanel x:Name="ButtonsPanel"
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"

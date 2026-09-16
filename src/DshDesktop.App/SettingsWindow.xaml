@@ -47,11 +47,8 @@
                     </StackPanel>
                 </Border>
 
-                <!-- ===== 控制台（设置页第二项；它仍是"现在发生了什么"的唯一出口）=====
-                     这一栏收拢三件与"当前状态"直接相关的东西：
-                     ① 错误信息（内联在标题行）；
-                     ② 需要临时 URL 时的提示与输入框（NeedsToken 才出现，在输出区之前）；
-                     ③ 控制台输出本身。 -->
+                <!-- ===== 控制台（设置页第二项；它仍是「现在发生了什么」的唯一出口）：错误信息（内联在
+                     标题行）、需要临时 URL 时的提示与输入框（NeedsToken 才出现）、控制台输出本身。 ===== -->
                 <Border x:Name="ConsoleArea" Style="{StaticResource SectionCardStyle}">
                     <StackPanel>
                         <Grid Margin="0,0,0,8">
@@ -89,9 +86,8 @@
                                     ToolTip="只清空 WebView2 的全部 Cookie（页面需刷新后才会体现为登出）" />
                         </Grid>
 
-                        <!-- 临时 URL 区（仅 NeedsToken 时可见），在输出区之前：
-                             用户此刻唯一要做的就是粘贴 URL，不能让它垫在输出区下面。
-                             隐藏时输出区紧跟标题行。 -->
+                        <!-- 临时 URL 区（仅 NeedsToken 时可见），置于输出区之前：用户此刻唯一要做的就是粘贴 URL，
+                             不能让它埋在输出区下面。隐藏时输出区紧贴标题行。 -->
                         <StackPanel x:Name="TempUrlPanel"
                                     Visibility="{Binding NeedsTokenVisibility}"
                                     Margin="0,0,0,12">
@@ -164,8 +160,7 @@
                                          IsChecked="{Binding ServiceStrategy, Mode=TwoWay, Converter={StaticResource EnumBool}, ConverterParameter=AlwaysStart}" />
                         </StackPanel>
 
-                        <!-- 启动配置块：选了「不启动，直接打开url」就整块实时隐藏 ——
-                             不启动服务就没有可配置的启动参数（用户要求，2026-09-14）。
+                        <!-- 启动配置块：选「不启动，直接打开url」就整块隐藏 —— 不启动服务就没有可配置的启动参数。
                              Visibility 走 ServiceNeverStart 派生属性的 INPC 通知，切换单选立即生效。 -->
                         <StackPanel Visibility="{Binding ServiceNeverStart, Converter={StaticResource BoolVis}, ConverterParameter=Invert}">
 
@@ -268,8 +263,7 @@
                                       IsChecked="{Binding DragStripEnabled, Mode=TwoWay}" />
                         </Grid>
 
-                        <!-- 配置块：未启用拖动层就整块实时隐藏 —— 用户要求（2026-09-14）。
-                             Visibility 直接绑 DragStripEnabled 的 INPC 通知，切换立即生效。 -->
+                        <!-- 配置块：未启用拖动层就整块隐藏。Visibility 直接绑 DragStripEnabled 的 INPC 通知。 -->
                         <StackPanel Visibility="{Binding DragStripEnabled, Converter={StaticResource BoolVis}}">
                             <!-- 三个尺寸字段与「颜色和透明度」同行（设计图 1）；默认值说明移到块底 -->
                             <Grid Margin="0,0,0,14">

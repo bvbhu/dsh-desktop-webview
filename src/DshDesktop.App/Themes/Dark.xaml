@@ -5,8 +5,7 @@
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#1E1E1E" />
     <SolidColorBrush x:Key="WindowBorderBrush" Color="#3C3C3C" />
 
-    <!-- 三键：底色与悬停色都必须**不透明** —— 它们是浮在页面之上的控件，
-         半透明会让页面内容透上来，看着就像"按键渲染坏了"。 -->
+    <!-- 三键：底色与悬停色必须**不透明** —— 它们浮在页面之上，半透明会让页面内容透上来。 -->
     <SolidColorBrush x:Key="ChromeButtonIconBrush" Color="#FFFFFF" />
     <SolidColorBrush x:Key="ChromeButtonBackgroundBrush" Color="#1E1E1E" />
     <SolidColorBrush x:Key="ChromeButtonHoverBackgroundBrush" Color="#3A3A3A" />
@@ -28,12 +27,9 @@
     <SolidColorBrush x:Key="AccentBrush" Color="#4C9AFF" />
     <SolidColorBrush x:Key="AccentHoverBrush" Color="#6DB0FF" />
 
-    <!-- PixiEditor 颜色选择器的暗色外观。
-         为什么直接复用库自带的字典而不是自己写一套模板：它内部就是 Label / Grid(MainGrid) /
-         TabControl / TextBox 这些普通控件，自己写等于把 4 份暗色模板抄一遍；
-         而它的主背景 #252525 与本主题的 PanelBackgroundBrush #252526 几乎重合，直接套用即可。
-         这个键在 Light.xaml 里也有定义（空样式 = 用 WPF 原生浅色外观），
-         控件通过 DynamicResource 引用它，所以换主题会自动跟着换。 -->
+    <!-- PixiEditor 颜色选择器的暗色外观：直接复用库自带字典，它的主背景 #252525 与本主题的
+         PanelBackgroundBrush #252526 几乎重合。Light.xaml 里同名键为空样式（用 WPF 原生浅色外观），
+         控件用 DynamicResource 引用，换主题会自动跟着换。 -->
     <Style x:Key="ColorPickerHostStyle" TargetType="UserControl">
         <Style.Resources>
             <ResourceDictionary Source="pack://application:,,,/ColorPicker;component/Styles/DefaultColorPickerStyle.xaml" />

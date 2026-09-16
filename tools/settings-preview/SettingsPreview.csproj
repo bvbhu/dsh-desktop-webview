@@ -1,12 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!--
-    Dev-only render harness (2026-09-14). Renders the REAL SettingsWindow offscreen to a PNG so
-    the layout can be eyeballed without UI-automating the live app (which this sandbox blocks).
-
-    Deliberately NOT in DSH-Desktop-Webview.sln: it is a developer tool, not a shipping artifact,
-    and it must never end up in the portable package.
-  -->
+  <!-- Renders the REAL SettingsWindow offscreen to a PNG so the layout can be eyeballed without
+       UI-automating the live app. Dev-only; deliberately NOT in the .sln. -->
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows10.0.17763.0</TargetFramework>
@@ -19,28 +14,15 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!--
-      The shipping XAML resolves several pack://application:,,,/ URIs — SettingsWindow's
-      Icon="app.ico" and App.xaml's merged Themes/Dark.xaml. Pack URIs bind to the ENTRY assembly,
-      which here is SettingsPreview, so those files must exist in THIS assembly under the same
-      relative paths or the window dies at InitializeComponent.
-
-      Application.ResourceAssembly cannot be used instead: WPF makes it write-once and its static
-      initializer has already run by the time Main executes.
-
-      Link= preserves the relative path (app.ico stays at the root, Themes/*.xaml stay under
-      Themes/). Without matching layout the URI still 404s.
-    -->
+    <!-- Pack URIs bind to the ENTRY assembly: app.ico and Themes/*.xaml must exist here at the same
+         relative paths or the window dies at InitializeComponent. Link= preserves the path. -->
     <Resource Include="..\..\src\DshDesktop.App\app.ico" Link="app.ico" />
     <Page Include="..\..\src\DshDesktop.App\Themes\Dark.xaml" Link="Themes\Dark.xaml" />
     <Page Include="..\..\src\DshDesktop.App\Themes\Light.xaml" Link="Themes\Light.xaml" />
   </ItemGroup>
 
   <ItemGroup>
-    <!--
-      Private=true matters: without it the app assembly is not copied next to the harness, and
-      startup dies with FileNotFoundException: DSH-Desktop-Webview. Learned on tools/picker-preview.
-    -->
+    <!-- Private=true: without it the app assembly is not copied next to the harness and startup dies. -->
     <ProjectReference Include="..\..\src\DshDesktop.App\DshDesktop.App.csproj">
       <Private>true</Private>
     </ProjectReference>

@@ -34,10 +34,8 @@ public partial class MainWindow : System.Windows.Window
     private WebView2CompositionControl? _compositionView;
 
     // ---- 拖动热区手势判别（备选1·透传点击）----
-    // 合成版宿主必须捕获鼠标才能拖动窗口（WebView2 的组合视觉下，命中测试对每个像素是
-    // 全有或全无 —— 与拖动条重叠的页面像素本来也收不到鼠标）。因此改用手势判别：
-    // 快速点按 → 把这次点击合成转发给页面；按下后拖动超过阈值 → 拖动窗口。
-    // 下面四个字段只在左键按下期间有效。
+    // 合成版宿主必须捕获鼠标才能拖动窗口，因此改用手势判别：快速点按 → 把这次点击
+    // 合成转发给页面；按下后拖动超过阈值 → 拖动窗口。四个字段只在左键按下期间有效。
     private bool _stripActive;          // 左键已在拖动条按下
     private Point _stripDownPos;        // 按下位置（窗口坐标，用于算位移阈值）
     private MouseButtonEventArgs? _stripDownArgs; // 保存 Down 事件，抬起时重建出点击
@@ -50,17 +48,15 @@ public partial class MainWindow : System.Windows.Window
     private bool _recovering;
 
     /// <summary>
-    /// 窗口最小 500×500（用户指定 2026-09-14）。单一真相源，两处消费：
-    /// ① 构造期设 MinWidth/MinHeight，把拖拽缩小的下限拦住；
-    /// ② RestoreWindowPosition 的异常值判定 —— 配置里的尺寸低于它也算异常，恢复默认。
+    /// 窗口最小 500×500（用户指定 2026-09-14）。单一真相源，两处消费：构造期设
+    /// MinWidth/MinHeight 拦住拖拽缩小；RestoreWindowPosition 用它判定配置里的异常尺寸。
     /// </summary>
     private const double MinWindowWidth = 500;
     private const double MinWindowHeight = 500;
 
     /// <summary>
-    /// 设置窗口刚提交过临时 URL、正在等这次导航完成。页面真正打开
-    /// （NavigationCompleted 成功）后据此清错误提示并关掉设置窗口（用户要求），
-    /// 平时的导航（启动流程、刷新）不该碰设置窗口。
+    /// 设置窗口刚提交过临时 URL、正在等这次导航完成。成功后据此清错误提示并关掉设置
+    /// 窗口；平时的导航（启动流程、刷新）不该碰设置窗口。
     /// </summary>
     private bool _awaitTempUrlNavigation;
 
@@ -93,17 +89,14 @@ public partial class MainWindow : System.Windows.Window
         _webViewProfilePath = webViewProfilePath;
         _runLog = runLog;
 
-        // 窗口最小 500×500（用户指定 2026-09-14）：拦住拖拽缩小的下限。
-        // 配置异常值的判定用同一组常量，见 MinWindowWidth/MinWindowHeight。
+        // 窗口最小 500×500：拦住拖拽缩小的下限（异常值判定见 MinWindowWidth 注释）。
         MinWidth = MinWindowWidth;
         MinHeight = MinWindowHeight;
 
-        // 窗口样式：默认保留 SingleBorderWindow（即保留 WS_CAPTION）。
-        // 当初用 WindowStyle="None" 是为了"无标题栏"，但它会把 WS_CAPTION 一起摘掉；
-        // 而实测（2026-09-13）DWM 的最小化/最大化过渡动画与窗口的 caption/frame 绑定 ——
-        // 没有 WS_CAPTION 就没有原生过渡动画（对比原生窗口的样式位，唯一关键差异就是它）。
-        // "无标题栏"本来也不需要靠它：WindowChrome 的 CaptionHeight=0 与它对 WM_NCCALCSIZE
-        // 的处理已经让客户区铺满整窗。
+        // 窗口样式：默认保留 WS_CAPTION。当初用 WindowStyle="None" 是为了"无标题栏"，
+        // 但它会把 WS_CAPTION 一起摘掉，而 DWM 的最小化/最大化过渡动画与 caption/frame
+        // 绑定 —— 没有它就没有原生过渡动画（2026-09-13 实测）。"无标题栏"本来也不靠它：
+        // WindowChrome 的 CaptionHeight=0 已让客户区铺满整窗。
         // 退路：DSH_WINDOW_STYLE=none 退回旧行为，不必重新编译。
         if (string.Equals(Environment.GetEnvironmentVariable("DSH_WINDOW_STYLE"), "none",
                 StringComparison.OrdinalIgnoreCase))
@@ -116,14 +109,13 @@ public partial class MainWindow : System.Windows.Window
             _runLog?.Append("[shell] 窗口样式=SingleBorderWindow（保留 WS_CAPTION，用 DWM 原生过渡动画）");
         }
 
-        // 把"最大化"的尺寸夹到显示器工作区：否则 WindowChrome 让客户区 == 整窗，
-        // Windows 惯用的那圈边框溢出（本机 8px）会变成"内容四周被裁"（见 WorkAreaMaximizer）。
+        // 把"最大化"的尺寸夹到显示器工作区，否则 WindowChrome 让客户区 == 整窗时，
+        // 系统那圈边框（本机 8px）会造成"内容四周被裁"（见 WorkAreaMaximizer）。
         WorkAreaMaximizer.Attach(this, line => _runLog?.Append(line));
 
-        // 启动即最大化延后到这里做：句柄刚创建、且上面那个 WM_GETMINMAXINFO 处理已经挂上。
-        // 若照旧在构造函数里直接设 WindowState，那一次最大化会走系统默认值（工作区 + 一圈边框），
-        // 内容会被裁掉 8px，直到用户手动切一次最大化才纠正。
-        // 两个 SourceInitialized 处理器的执行顺序 = 注册顺序，所以上面先挂钩子、这里后设状态。
+        // 启动即最大化延后到这里：句柄已创建、上面的 WM_GETMINMAXINFO 钩子已挂上。
+        // 若在构造函数里直接设 WindowState，那次最大化会走系统默认值（工作区 + 一圈边框），
+        // 内容被裁 8px 直到用户手动切一次。两个 SourceInitialized 处理器按注册顺序执行。
         var startMaximized = _config.WindowMaximized;
         SourceInitialized += (_, _) =>
         {
@@ -134,6 +126,7 @@ public partial class MainWindow : System.Windows.Window
         SetupWebViewHost();
         RestoreWindowPosition();
         ApplyAppearance();
+        Title = $"{Title} {AppVersion}";
 
         ChromeBar.MinimizeRequested += (_, _) => WindowState = WindowState.Minimized;
         ChromeBar.MaximizeRequested += (_, _) => ToggleMaximize();
@@ -151,19 +144,17 @@ public partial class MainWindow : System.Windows.Window
         };
         StateChanged += OnStateChanged;
         // 初始状态也要归一：RestoreWindowPosition 可能已把 WindowState 设成 Maximized，
-        // 而那时还没订阅 StateChanged。不补这一下，启动即最大化时会留下
-        // "带 1px 边框 + 6px 缩放热区"的不一致状态。
+        // 而那时还没订阅 StateChanged，不补这一下会留下"带边框 + 缩放热区"的不一致状态。
         OnStateChanged(this, EventArgs.Empty);
         Closing += OnClosing;
         Loaded += async (_, _) => await InitializeAsync();
     }
 
     /// <summary>
-    /// 宿主模式。<b>默认合成版</b>：它能被 WPF 浮层覆盖，因而能做出设计文档 §7.1 要求的
-    /// "全窗口铺满 + 三键浮层 + 拖动热区"。
-    /// 之所以留环境变量而不写死，是为了保留一条不必重新编译的退路：合成版经 D3DImage 走
-    /// WinRT 投影，运行期需要 Microsoft.Windows.SDK.NET.dll（见 csproj 的 TargetFramework 注释），
-    /// 万一加载不了，`$env:DSH_WEBVIEW_HOST="hwnd"` 就能退回 HwndHost 版。
+    /// 宿主模式。默认合成版：它能被 WPF 浮层覆盖，因而能做出设计文档 §7.1 要求的
+    /// "全窗口铺满 + 三键浮层 + 拖动热区"。留环境变量而不写死，是为了保留一条不必重新
+    /// 编译的退路：合成版经 D3DImage 走 WinRT 投影，运行期需要 Microsoft.Windows.SDK.NET.dll
+    /// （见 csproj 的 TargetFramework 注释），万一加载不了可退回 HwndHost 版。
     /// </summary>
     private static bool UseCompositionHost =>
         !string.Equals(Environment.GetEnvironmentVariable("DSH_WEBVIEW_HOST"), "hwnd",
@@ -178,29 +169,28 @@ public partial class MainWindow : System.Windows.Window
             return;
         }
 
-        // 合成版的运行期前提：WinRT 投影程序集必须在位。
-        // 之所以要显式探测：抛出点在 TryInitializeD3DImage → OnApplyTemplate → MeasureCore，
-        // 而首次 Measure 发生在 Window.Show() 里 —— 早于 Loaded，本类的 try/catch 够不着，
-        // 症状是两条 [fatal] 且完全没有降级（2026-09-13 实测：单文件产物缺该 DLL）。
-        // 直接按简单名加载一次，正是 CsWinRT 解析投影程序集走的那条路；
-        // 加载不了就根本不创建合成控件，直接留在 hwnd 上。
+        // 合成版的运行期前提：WinRT 投影程序集必须在位。必须显式探测，因为抛出点在
+        // TryInitializeD3DImage → OnApplyTemplate → MeasureCore，而首次 Measure 发生在
+        // Window.Show() 里，早于 Loaded，本类的 try/catch 够不着 —— 症状是两条 [fatal]
+        // 且完全没有降级（2026-09-13 实测：单文件产物缺该 DLL）。按简单名加载一次正是
+        // CsWinRT 解析投影程序集走的那条路；加载不了就根本不创建合成控件。
         if (!TryLoadWinRtProjection(out var projectionDetail))
         {
             _runLog?.Append($"[host-fallback] 合成版前置检查未通过：WinRT 投影程序集不可加载（{projectionDetail}）");
             return;
         }
 
-        // 先摘掉 XAML 声明的 HwndHost 控件：此时还没到 Loaded，
-        // HwndHost 的子 HWND 尚未创建，不会留下多余的隐藏窗口。
+        // 先摘掉 XAML 声明的 HwndHost 控件：此时还没到 Loaded，子 HWND 尚未创建，
+        // 不会留下多余的隐藏窗口。
         WebHost.Children.Remove(_hwndView);
 
         try
         {
             var view = new WebView2CompositionControl();
             _compositionView = view;
-            // 让 DragStrip 的光标跟随页面：合成宿主在 CursorChanged 里把页面光标设到自己的
-            // Cursor DP，绑过去后，鼠标悬停在拖动条上时显示的也是页面光标（手型/文本等），
-            // 而非默认箭头——与悬停透传配合，顶部 40px 视觉上"不存在"。
+            // 让 DragStrip 的光标跟随页面：合成宿主在 CursorChanged 里把页面光标写进自己的
+            // Cursor DP，绑过去后悬停在拖动条上显示的也是页面光标（手型/文本等）而非默认
+            // 箭头 —— 与悬停透传配合，顶部 40px 视觉上"不存在"。
             DragStrip.SetBinding(System.Windows.FrameworkElement.CursorProperty,
                 new System.Windows.Data.Binding(nameof(WebView2CompositionControl.Cursor)) { Source = view });
             ApplyCompositionLayout();
@@ -219,10 +209,8 @@ public partial class MainWindow : System.Windows.Window
     /// <summary>
     /// 合成版布局：宿主挪到第 0 行并跨满两行 —— 页面真正铺满整窗；顶栏底色收起
     /// （<c>TopBar.Collapsed</c>），只留可配置的 DragStrip 与三键浮层（§7.1、§7.3）。
-    /// <para>
-    /// Row 必须和 RowSpan 一起改：对 <c>Grid.Row=1</c> 的元素设 RowSpan=2，在只有两行的
-    /// 网格里跨不出第 2 行来，等于没跨 —— 这就是"全铺满"此前一直没真正生效的原因。
-    /// </para>
+    /// Row 必须和 RowSpan 一起改：两行网格里对 <c>Row=1</c> 的元素设 RowSpan=2 跨不出
+    /// 第 2 行来，等于没跨 —— 这就是"全铺满"此前一直没真正生效的原因。
     /// </summary>
     private void ApplyCompositionLayout()
     {
@@ -250,7 +238,7 @@ public partial class MainWindow : System.Windows.Window
 
     /// <summary>
     /// WinRT 投影程序集是否可加载。单文件打包若没把 Microsoft.Windows.SDK.NET.dll
-    /// 打进 bundle，这里就会失败 —— 提前失败，而不是留到 Window.Show 里变成不可捕获的 [fatal]。
+    /// 打进 bundle 就在这里失败 —— 提前失败，而不是留到 Window.Show 里变成不可捕获的 [fatal]。
     /// </summary>
     private static bool TryLoadWinRtProjection(out string detail)
     {
@@ -267,6 +255,12 @@ public partial class MainWindow : System.Windows.Window
         }
     }
 
+    /// <summary>csproj 里的软件版本号，去掉末尾 ".0" 修订号（显示 1.0.1 而非 1.0.1.0）。</summary>
+    private static string AppVersion =>
+        System.Reflection.Assembly.GetExecutingAssembly().GetName().Version is { } v
+            ? $"{v.Major}.{v.Minor}.{v.Build}"
+            : "1.0.1";
+
     /// <summary>当前生效宿主的 CoreWebView2；未初始化完成时为 null。</summary>
     private CoreWebView2? Core =>
         _compositionView?.CoreWebView2 ?? _hwndView?.CoreWebView2;
@@ -280,33 +274,28 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// <c>CoreWebView2.ProcessFailed</c> 的统一处理。抽成方法而不是写成 lambda，
-    /// 是因为重建后的新 core 也必须挂上同一个处理器 —— 否则第一次崩溃能自愈、
-    /// 第二次就只能留个死窗口。
+    /// <c>CoreWebView2.ProcessFailed</c> 的统一处理。抽成方法而不是 lambda，是因为重建后的
+    /// 新 core 也必须挂上同一个处理器 —— 否则第一次崩溃能自愈、第二次就只能留个死窗口。
     /// </summary>
     private void OnCoreProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
     {
         _runLog?.Append($"[shell] WebView2 进程异常: kind={e.ProcessFailedKind}");
 
-        // 只记日志是不够的：浏览器进程一旦退出，CoreWebView2 就永久失效，之后每次 Navigate
-        // 都抛 InvalidOperationException，窗口从此一片空白（2026-09-14 run.log 实际踩到）。
+        // 只记日志不够：浏览器进程一旦退出 CoreWebView2 就永久失效，之后每次 Navigate 都抛
+        // InvalidOperationException，窗口从此一片空白（2026-09-14 run.log 实际踩到）。
         if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.BrowserProcessExited)
             RecoverFromBrowserCrash();
     }
 
     /// <summary>
-    /// 浏览器进程崩了之后重建视图。<b>丢掉旧控件、换一个新的</b>，而不是"把旧控件 Dispose
-    /// 掉再让它在原地复活"。
-    /// </summary>
-    /// <remarks>
-    /// 为什么必须换控件：控件的浏览器进程一旦退出，其内部 <c>CoreWebView2</c> 就处于已释放状态，
-    /// 此时再对**同一个**控件调 <c>EnsureCoreWebView2Async</c> 会抛 <c>ObjectDisposedException</c>，
-    /// 恢复永远失败。新控件带着全新的原生实例，没有这个包袱。
+    /// 浏览器进程崩了之后重建视图：丢掉旧控件、换一个新的，而不是"把旧控件 Dispose 掉
+    /// 再让它在原地复活"。
     /// <para>
-    /// 恢复只做一次：连崩两次说明环境真跑不起来（如本机的虚拟显示适配器问题），
-    /// 无限重试只会变成崩溃循环。
+    /// 必须换控件：控件的浏览器进程一旦退出，其内部 <c>CoreWebView2</c> 就处于已释放状态，
+    /// 再对同一个控件调 <c>EnsureCoreWebView2Async</c> 会抛 <c>ObjectDisposedException</c>，
+    /// 恢复永远失败。只恢复一次：连崩两次说明环境真跑不起来，无限重试只会变成崩溃循环。
     /// </para>
-    /// </remarks>
+    /// </summary>
     private void RecoverFromBrowserCrash()
     {
         if (_recovering)
@@ -325,9 +314,8 @@ public partial class MainWindow : System.Windows.Window
                     return;
                 }
 
-                // 关键：旧控件先摘掉再释放，且**不能**再拿它去 EnsureCoreWebView2Async。
-                // 先 Detach 是为了让它脱离可视树 —— 否则已死的控件仍留在布局里，
-                // 新控件叠上去会看到一层残留的空白。
+                // 关键：旧控件先摘掉再释放，且不能再拿它去 EnsureCoreWebView2Async。
+                // 先摘是为了让它脱离可视树，否则已死的控件仍留在布局里，新控件叠上去会看到残影。
                 var deadComposition = _compositionView;
                 var deadHwnd = _compositionView is null ? _hwndView : null;
 
@@ -348,17 +336,15 @@ public partial class MainWindow : System.Windows.Window
                 }
                 else
                 {
-                    // hwnd 版的 WebView2 是 XAML 里声明的那个实例，扔不掉；
-                    // 但它的 HwndHost 子窗口同样是"一次性"的，所以这里用新建的
-                    // 控件替换它，并把 _hwndView 指向新实例。
+                    // hwnd 版的 WebView2 是 XAML 声明的实例、扔不掉，但它的 HwndHost 子窗口
+                    // 同样是"一次性"的，所以用新建控件替换它，并把 _hwndView 指向新实例。
                     var fresh = new WebView2();
                     ApplyHwndLayout();
                     WebHost.Children.Add(fresh);
                     _hwndView = fresh;
                 }
 
-                // 旧控件这时才释放。放在新控件接上之后：中间不留"无控件"的窗口，
-                // 布局不会跳一下。
+                // 旧控件这时才释放：放在新控件接上之后，中间不留"无控件"的窗口，布局不会跳。
                 deadComposition?.Dispose();
 
                 await EnsureCoreAsync(_environment);
@@ -413,20 +399,13 @@ public partial class MainWindow : System.Windows.Window
 
     /// <summary>
     /// 恢复窗口位置与大小。配置里 <c>WindowX/WindowY</c> 为 0 是"从未记忆过"的哨兵值，
-    /// 此时按**工作区居中**摆放（用户要求 1500×750 居中）。
+    /// 此时按工作区居中摆放。居中必须在运行期算：屏幕分辨率与任务栏位置各机不同，
+    /// 写死的坐标换台机器就会偏到屏幕外或压在任务栏下。
     /// <para>
-    /// 为什么居中要在运行时算而不是把坐标写死进默认值：屏幕分辨率与任务栏位置各机不同，
-    /// 写死的坐标换台机器就会偏到屏幕外或压在任务栏下。这里只固定尺寸，位置交给工作区。
-    /// </para>
-    /// <para>
-    /// 异常值防护（2026-09-14）：config.json 可能被手改、截断后仍可解析、或从小屏机器拷贝过来。
-    /// 尺寸低于最小 500×500 或超过当前工作区、位置整体落在工作区之外时，一律恢复默认
-    /// 1500×750 并居中，不让坏值原样生效。结构非法的 JSON 在 App.OnStartup 已整体回退默认，
-    /// 这里兜的是"结构合法但数值离谱"这一层。
-    /// </para>
-    /// <para>
-    /// 注意：这里**不**恢复最大化状态。启动即最大化必须等句柄创建、且把
-    /// WM_GETMINMAXINFO 的处理挂上之后再设，见构造函数的 SourceInitialized。
+    /// 异常值防护（2026-09-14）：config.json 可能被手改、截断后仍可解析、或从小屏机器拷来。
+    /// 尺寸低于最小 500×500 或超过工作区、位置整体落在工作区之外时一律恢复默认并居中。
+    /// 结构非法的 JSON 已在 App.OnStartup 整体回退，这里兜的是"结构合法但数值离谱"这一层。
+    /// 注意这里不恢复最大化状态：那要等句柄创建、WM_GETMINMAXINFO 钩子挂上之后再做。
     /// </para>
     /// </summary>
     private void RestoreWindowPosition()
@@ -435,8 +414,8 @@ public partial class MainWindow : System.Windows.Window
         var width = _config.WindowWidth;
         var height = _config.WindowHeight;
 
-        // 尺寸护栏：低于最小 500×500（含 <=0 与负数）或大于工作区都算异常，恢复默认尺寸。
-        // 用工作区做上限而非硬编码常数：4K 屏上 1920×1080 的记忆值是合法的，不能误伤。
+        // 尺寸护栏：低于最小 500×500（含 <=0）或大于工作区都算异常，恢复默认尺寸。
+        // 上限用工作区而非硬编码常数：4K 屏上 1920×1080 的记忆值是合法的，不能误伤。
         var def = AppConfig.CreateDefault();
         if (width < MinWindowWidth || width > work.Width || height < MinWindowHeight || height > work.Height)
         {
@@ -458,8 +437,8 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 位置是否可信：哨兵 (0,0) 表示"从未记忆"→ 居中；其余情况下窗口哪怕只露出一角
-    /// （右/下边越界一点）也尊重用户记忆，只有整体落在工作区之外才判定异常 → 居中。
+    /// 位置是否可信：哨兵 (0,0) 表示"从未记忆"→ 居中；其余情况哪怕只露出一角也尊重用户记忆，
+    /// 只有整体落在工作区之外才判定异常。
     /// </summary>
     private static bool IsPlacementSane(double x, double y, Rect work)
     {
@@ -470,8 +449,7 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 按当前显示器工作区居中。用工作区而不是整屏：任务栏会吃掉一条边，
-    /// 按整屏居中会显得偏上/偏下。
+    /// 按当前显示器工作区居中。用工作区而不是整屏：任务栏会吃掉一条边，按整屏居中会显得偏。
     /// </summary>
     private void CenterOnWorkArea()
     {
@@ -481,7 +459,7 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 把当前配置套到所有"纯外观"元素上。构造期调用一次；设置窗口每次保存后再调用一次，
+    /// 把当前配置套到所有"纯外观"元素上。构造期调用一次；设置窗口每次保存后再调一次，
     /// 这样三键与拖动热区不必重启就能生效。
     /// </summary>
     private void ApplyAppearance()
@@ -489,8 +467,8 @@ public partial class MainWindow : System.Windows.Window
         ChromeBar.Configure(_config);
         SetupDragStrip();
 
-        // 把"实际生效了什么"写进日志。颜色类配置一旦解析不了就会回落主题色/默认色，
-        // 用户看到的只是"设置疑似不生效" —— 这行日志让这件事一眼可查。
+        // 把"实际生效了什么"写进日志：颜色配置解析不了就会静默回落主题色/默认色，
+        // 用户只看到"设置疑似不生效"，这行日志让这件事一眼可查。
         _runLog?.Append($"[chrome] 图标色={Describe(_config.ChromeButtonIconColor)} "
             + $"底色={Describe(_config.ChromeButtonBackground)} "
             + $"悬停延迟={_config.ChromeHoverDelayMs}ms 默认显隐={_config.ChromeButtonsDefault}");
@@ -536,36 +514,27 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 拖动热区的左键按下：<b>不立即拖动</b>，先进入手势判别（备选1「透传点击」）。
-    /// 设计文档 §7.3 原本把这一条记为"刻意挡在页面之上"，本改动把它改为
-    /// "快速点按 → 点击透传进页面；按下后位移超阈值 → 拖动窗口"。
+    /// 拖动热区的左键按下：不立即拖动，先进入手势判别。设计文档 §7.3 原本把这一条记为
+    /// "刻意挡在页面之上"，现改为"快速点按 → 点击透传进页面；位移超阈值 → 拖动窗口"。
     /// <para>
-    /// 为什么点按能透传：合成版宿主（<c>WebView2CompositionControl</c>）经 D3DImage
-    /// 输出，命中测试在拖动条像素上是 WPF 该条优先 —— 鼠标事件被 WPF 吃掉，
-    /// WebView2 收不到。要让页面收到这次点击，只能由我们把按下/抬起<a>重建</a>出来、
-    /// 再走宿主自带的 <c>OnMouseDown/Up → SendMouseInput</c> 转发进浏览器。
-    /// </para>
-    /// <para>
-    /// 按下后<b>不</b>捕获鼠标（详见方法内注释）：只要位移越过阈值即判定为拖动，
-    /// 放弃透传、改走 <see cref="BeginWindowDrag"/>（原生标题栏拖动，含 Aero 吸附）。
+    /// 点按能透传，是因为合成版宿主经 D3DImage 输出，命中测试在拖动条像素上 WPF 优先 ——
+    /// 鼠标事件被 WPF 吃掉、WebView2 收不到，只能由我们重建按下/抬起再转发进浏览器。
+    /// 按下后不捕获鼠标，只要位移越过阈值即判定为拖动，放弃透传、改走原生标题栏拖动。
     /// </para>
     /// </summary>
     private void DragStrip_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         // 不捕获鼠标：CaptureMouse 会在 Win32 层 SetCapture，与 BeginWindowDrag 的
-        // WM_NCLBUTTONDOWN 标题栏拖动循环打架（窗口拖不动）；更糟的是抬起时
-        // ReleaseMouseCapture 会同步触发 LostMouseCapture、把 _stripDownArgs 清空，
-        // 让 ForwardClickToPage 永远进不去 —— 这正是上一版"既不能拖也不能点"的根因。
-        // 手势判别不需要捕获：阈值仅 4 DIP，40px 高的拖动条内必然收得到足够的
-        // MouseMove 与 MouseLeftButtonUp。
+        // WM_NCLBUTTONDOWN 标题栏拖动循环打架（窗口拖不动）；更糟的是抬起时 ReleaseMouseCapture
+        // 会同步触发 LostMouseCapture、清空 _stripDownArgs，让 ForwardClickToPage 永远进不去。
+        // 手势判别也不需要捕获：阈值仅 4 DIP，40px 高的拖动条内必然收得到 MouseMove 与 MouseUp。
         _stripActive = true;
         _stripDownArgs = e;
         _stripDownPos = e.GetPosition(this);
         _stripDragging = false;
         e.Handled = true;
 
-        // hwnd 宿主没有可转发点击的组合控制，手势判别无意义 —— 直接保持旧行为（按下即拖动）。
-        // TopBar 那条也是拖动面（hwnd / 合成版都走这里）。
+        // hwnd 宿主没有可转发点击的组合控制，手势判别无意义 —— 保持旧行为（按下即拖动）。
         if (_compositionView is null)
         {
             BeginWindowDrag();
@@ -573,9 +542,8 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 捕获意外丢失时兜底复位手势状态。本类已不再 <c>CaptureMouse</c>，正常流程不会触发；
-    /// 保留是为防御（例如系统/第三方抢走捕获而恰好没收到 MouseUp）。千万别在这条路径里
-    /// 转发点击 —— 丢失捕获的那次按下本不该算作对页面的点击。
+    /// 捕获意外丢失时兜底复位手势状态。本类已不再 <c>CaptureMouse</c>，正常流程不会触发，
+    /// 保留是为防御（系统/第三方抢走捕获而恰好没收到 MouseUp）。这条路径千万别转发点击。
     /// </summary>
     private void DragStrip_LostMouseCapture(object? sender, MouseEventArgs e)
     {
@@ -585,18 +553,14 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 拖动热区上的鼠标移动。两条职责：
-    /// <list type="bullet">
-    /// <item><b>悬停透传</b>：未按下（不在按下手势中）时，把移动以 Move 转发给页面，让悬停
-    ///   效果、光标样式、tooltip 在顶部 40px 也跟随——否则合成宿主的 OnMouseMove 被本条
-    ///   截走，页面收不到，悬停状态停在进入拖动条前的那一刻。</item>
-    /// <item><b>拖动判别</b>：按下手势中位移越过阈值则升级为窗口拖动，交给系统标题栏循环。</item>
-    /// </list>
+    /// 拖动热区上的鼠标移动，两条职责：未按下时把移动以 Move 转发给页面（悬停效果、光标样式、
+    /// tooltip 在顶部 40px 才跟随，否则合成宿主的 OnMouseMove 被本条截走，页面悬停状态停在
+    /// 进入拖动条前的那一刻）；按下手势中位移越过阈值则升级为窗口拖动。
     /// </summary>
     private void DragStrip_MouseMove(object sender, MouseEventArgs e)
     {
-        // 悬停透传：未处于按下手势时，把光标位置以 Move（无按键）转发给页面。一旦按下
-        // （_stripActive=true）就不再走这条，改由下面的拖动判别接管，避免与拖动判别抢消息。
+        // 未按下时把光标位置以 Move（无按键）转发给页面；一旦按下就交给下面的拖动判别，
+        // 避免两条路径抢消息。
         if (!_stripActive)
         {
             SendMouseEvent(CoreWebView2MouseEventKind.Move, CoreWebView2MouseEventVirtualKeys.None);
@@ -611,8 +575,8 @@ public partial class MainWindow : System.Windows.Window
 
         _stripDragging = true;
         _stripDownArgs = null;
-        // 直接交还给系统标题栏拖动循环。没有 CaptureMouse，无需释放；SendMessage 同步
-        // 跑完整个拖动直到用户松开，期间 _stripDragging=true 阻止重复进入或误判为点击。
+        // 交还给系统标题栏拖动循环。没有 CaptureMouse 无需释放；SendMessage 同步跑完整个
+        // 拖动直到用户松开，期间 _stripDragging=true 阻止重复进入或误判为点击。
         BeginWindowDrag();
     }
 
@@ -633,12 +597,9 @@ public partial class MainWindow : System.Windows.Window
             return;
         }
 
-        // 快速点按：反射调用宿主的 SendMouseInput（Move→Down→Up）把这次点击送进页面 ——
-        // 与宿主自身 OnMouseDown 走同一条转发通路，但跳过其焦点守卫与 WPF 路由事件
-        // （RaiseEvent 重放实测页面收不到）。合成版宿主不存在时（hwnd 模式）上面 Down
-        // 已直接拖动，不会走到这里。
-        // 关键：不要在转发前 ReleaseMouseCapture —— 会同步触发 LostMouseCapture 清空
-        // _stripDownArgs（上一版 bug）。本类已不再 CaptureMouse，此处无需释放。
+        // 快速点按：反射调宿主的 SendMouseInput（Move→Down→Up）把点击送进页面 —— 与宿主
+        // 自身 OnMouseDown 同一条转发通路，但跳过其焦点守卫与 WPF 路由事件（RaiseEvent
+        // 重放实测页面收不到）。不要在转发前 ReleaseMouseCapture：会清空 _stripDownArgs。
         if (_stripDownArgs is not null && _compositionView is not null)
         {
             ForwardClickToPage();
@@ -647,29 +608,18 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 缓存的 <c>WebView2CompositionControl.SendMouseInput</c> 反射句柄。
-    /// 该方法是宿主把鼠标送进浏览器的转发原语（其 OnMouseDown/Up/Move 内部即调它），
-    /// 在 XML 文档里有载、但访问级别非 public，故用反射调用。点击透传与悬停透传共用此句柄。
+    /// 缓存的 <c>WebView2CompositionControl.SendMouseInput</c> 反射句柄：宿主把鼠标送进
+    /// 浏览器的转发原语（其 OnMouseDown/Up/Move 内部即调它），非 public 故用反射。
+    /// 点击透传与悬停透传共用。
     /// </summary>
     private static System.Reflection.MethodInfo? _sendMouseInput;
 
     /// <summary>
-    /// 把一次鼠标事件经宿主的 <c>SendMouseInput</c> 转发进页面。点击透传与悬停透传共用。
-    /// <para>
-    /// <c>WebView2CompositionControl.SendMouseInput</c> 是宿主把鼠标送进浏览器的转发原语
-    /// （OnMouseDown/Up/Move 内部即调它）。它非 public，但 XML 文档有载——用反射直接调用，
-    /// 绕开 OnMouseDown 里可能的焦点守卫，以及 WPF 路由事件触发的不确定性
-    /// （<c>RaiseEvent(Mouse.MouseDownEvent)</c> 重放实测页面收不到点击）。
-    /// </para>
-    /// <para>
-    /// 坐标：<c>Mouse.GetPosition(_compositionView)</c> 取光标相对宿主的 DIP，乘以
-    /// <c>VisualTreeHelper.GetDpi(...).DpiScaleX</c> 得物理像素客户端坐标
-    /// （与宿主 OnMouseDown 内 <c>e.GetPosition(this) * _dpiScale</c> 同算法）。
-    /// </para>
-    /// <para>
-    /// <c>Core</c> 为 null（CoreWebView2 尚未就绪）时直接放弃——此时页面还没加载，转发只会
-    /// 反复抛异常刷屏；页面就绪后自然恢复。
-    /// </para>
+    /// 把一次鼠标事件经宿主的 <c>SendMouseInput</c> 转发进页面。它非 public 但 XML 文档有载，
+    /// 直接反射调用可绕开 OnMouseDown 里可能的焦点守卫与 WPF 路由事件的不确定性
+    /// （<c>RaiseEvent(Mouse.MouseDownEvent)</c> 重放实测页面收不到）。坐标取光标相对宿主的
+    /// DIP 乘以 DpiScaleX 得物理像素，与宿主 OnMouseDown 内算法一致。Core 为 null
+    /// （CoreWebView2 尚未就绪）时直接放弃，否则只会反复抛异常刷屏。
     /// </summary>
     private void SendMouseEvent(CoreWebView2MouseEventKind kind, CoreWebView2MouseEventVirtualKeys keys)
     {
@@ -705,9 +655,8 @@ public partial class MainWindow : System.Windows.Window
 
     /// <summary>
     /// 把一次"点按"转发进页面：Move（定位）→ LeftButtonDown → LeftButtonUp。
-    /// 先 Move 是因为合成宿主顶部被 DragStrip 盖住，其 OnMouseMove 没收到这次移动，
-    /// 浏览器侧"最近光标"可能陈旧。virtualKeys 对齐 Win32 MK_*：Move 无按键、
-    /// Down/Up 左键按下（WM_LBUTTONUP 仍带 MK_LBUTTON）。
+    /// 先 Move 是因为拖动条盖住了宿主顶部，其 OnMouseMove 没收到这次移动，浏览器侧的
+    /// "最近光标"可能陈旧。virtualKeys 对齐 Win32 MK_*：Down/Up 左键按下。
     /// </summary>
     private void ForwardClickToPage()
     {
@@ -717,20 +666,11 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 把左键按下交给系统标题栏拖动（WM_NCLBUTTONDOWN + HTCAPTION）。
-    /// 为什么不用 <c>Window.DragMove()</c>：
-    /// <list type="bullet">
-    /// <item>最大化时 <c>DragMove</c> 既不会还原也不会移动 —— 顶栏拖动在最大化态直接失灵；</item>
-    /// <item>它跟手性差，且不参与系统的 Aero 吸附 / 拖动还原语义。</item>
-    /// </list>
-    /// 本窗口保留了 <c>WS_CAPTION</c>（见构造函数注释），所以系统能接住这个 hit-test 并接管整个
-    /// 拖拽循环。由此免费得到两件原生能力：<b>最大化时往下拖会还原并跟随光标</b>（README「拖动」特性），
-    /// 以及<b>拖到屏幕边缘的 Aero 吸附</b>。OS 主循环会自己调用 <c>SetCapture</c>/释放，
-    /// 这里不需要手动捕获。
-    /// <para>
-    /// 依赖 WS_CAPTION：退路的 <c>DSH_WINDOW_STYLE=none</c> 模式没有它，此消息不会进入系统拖动循环
-    /// （该模式本就不追求原生动画/吸附，属已知取舍）。
-    /// </para>
+    /// 把左键按下交给系统标题栏拖动（WM_NCLBUTTONDOWN + HTCAPTION）。不用
+    /// <c>Window.DragMove()</c>：它最大化时既不还原也不移动，且跟手性差、不参与 Aero 吸附。
+    /// 本窗口保留了 <c>WS_CAPTION</c>（见构造函数），系统能接住这个 hit-test 并接管整个拖拽
+    /// 循环，由此免费得到"最大化时往下拖会还原"与"拖到屏幕边缘吸附"两件原生能力，
+    /// 也不需要手动 SetCapture。退路的 <c>DSH_WINDOW_STYLE=none</c> 模式没有它，属已知取舍。
     /// </summary>
     private void BeginWindowDrag()
     {
@@ -738,17 +678,15 @@ public partial class MainWindow : System.Windows.Window
         if (hwnd == IntPtr.Zero)
             return;
 
-        // 取物理像素的全局光标位置：native WM_NCLBUTTONDOWN 的 lParam 就是物理屏幕坐标，
+        // 取物理像素的全局光标位置：WM_NCLBUTTONDOWN 的 lParam 就是物理屏幕坐标，
         // 不经过 WPF 的 DIP 换算（高 DPI 下 PointToScreen 拿到的是 DIP，直接套会偏位）。
         if (!GetCursorPos(out var pt))
             return;
 
-        // lParam：低 16 位 = x，高 16 位 = y。都取 16 位有符号值：多点屏上坐标可为负，
-        // 低字转成有符号才不丢符号（见 WM_NCLBUTTONDOWN 文档）。
+        // lParam：低 16 位 = x，高 16 位 = y。取 16 位有符号值，多点屏上坐标可为负。
         var lParam = (pt.Y & 0xFFFF) << 16 | (pt.X & 0xFFFF);
 
-        // 关键：必须在左键仍处于按下状态、且鼠标捕获还在本窗口时发送，
-        // 系统才认得这是一次"标题栏按下"。同帧内同步投递，等值就好。
+        // 必须在左键仍按下、且鼠标捕获仍在本窗口时发送，系统才认得这是一次"标题栏按下"。
         SendMessage(hwnd, WmNcLButtonDown, HTCaption, lParam);
     }
 
@@ -770,10 +708,8 @@ public partial class MainWindow : System.Windows.Window
     }
 
     // ---- 最大化 / 最小化 / 还原 ----
-    //
-    // 这里只设 WindowState，过渡动画全部交给 DWM：窗口保留着 WS_CAPTION（见构造函数），
-    // 系统会照常播放原生的最小化 / 最大化 / 还原动画。
-    // 曾自绘过一套"缩放 + 淡出"兜底过渡，已按用户要求移除 —— 与 DWM 原生动画叠加会打架。
+    // 只设 WindowState，过渡动画全部交给 DWM：窗口保留着 WS_CAPTION，系统会照常播放原生
+    // 动画。曾自绘过一套"缩放 + 淡出"兜底过渡，与原生动画叠加会打架，已应用户要求移除。
     private void ToggleMaximize() =>
         WindowState = WindowState == WindowState.Maximized
             ? WindowState.Normal
@@ -787,12 +723,12 @@ public partial class MainWindow : System.Windows.Window
         WindowFrame.BorderThickness = maximized ? new Thickness(0) : new Thickness(1);
         ChromeBar.SetMaximized(maximized);
 
-        // 状态与尺寸两条路径都算一次（都是幂等的，谁后到谁生效）。
+        // 状态与尺寸两条路径都算一次（幂等，谁后到谁生效）。
         ApplyMaximizedContentInset();
     }
 
     /// <summary>
-    /// 最大化时把内容内缩一圈，抵掉系统给窗口额外加上的那圈边框（见 WorkAreaMaximizer）。
+    /// 最大化时把内容内缩一圈，抵掉系统额外加上的那圈边框（见 WorkAreaMaximizer）。
     /// 不改窗口矩形 —— 那条路系统不让改。
     /// </summary>
     private void ApplyMaximizedContentInset()
@@ -815,9 +751,8 @@ public partial class MainWindow : System.Windows.Window
         }
         catch (Exception ex)
         {
-            // Loaded 处理器是 async void：此处若不捕获，异常会直达 Dispatcher，
-            // 表现为"运行 exe 什么也不显示"且日志无痕。必须留下可判读的痕迹。
-            // 标签用纯 ASCII（init-fail），便于脚本对日志做关键词判读。
+            // Loaded 处理器是 async void：此处不捕获，异常会直达 Dispatcher，表现为
+            // "运行 exe 什么也不显示"且日志无痕。标签用纯 ASCII 便于脚本判读关键词。
             _runLog?.Append($"[init-fail] WebView2 初始化失败：{ex.GetType().Name}: {ex.Message}");
             MessageBox.Show(this, $"WebView2 初始化失败：{ex.Message}",
                 "DSH Desktop Webview", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -833,15 +768,14 @@ public partial class MainWindow : System.Windows.Window
 
         core.ProcessFailed += OnCoreProcessFailed;
         core.NavigationCompleted += OnCoreNavigationCompleted;
-        // 真实导航配对：探测自己也会导航主 WebView（WebViewProbe.ProbeAsync），
-        // 所以"真实导航"要用 NavigationStarting 把 Id 配对出来，它的 NavigationCompleted
-        // 才算"页面加载完成"（浮层消失的时刻）。见 _pendingRealNav / _realNavId 的注释。
+        // 探测自身也会导航主 WebView，所以"真实导航"要用 NavigationStarting 把 Id 配对出来，
+        // 它的 NavigationCompleted 才算"页面加载完成"（浮层消失的时刻）。
         core.NavigationStarting += OnCoreNavigationStarting;
 
         _probe.SetWebView(core);
         SetupContextMenu(core);
 
-        // "ready" 是纯 ASCII 锚点，便于脚本对日志做关键词判读；中文负载仅供人读。
+        // "ready" 是纯 ASCII 锚点，便于脚本判读日志关键词；中文负载仅供人读。
         _runLog?.Append("[shell] ready 窗口就绪，开始会话");
         _ = _session.StartSessionAsync(_config, CancellationToken.None);
     }
@@ -865,9 +799,8 @@ public partial class MainWindow : System.Windows.Window
                 _settingsMenuItem = item;
             }
 
-            // 拖动层开关（2026-09-14 用户要求）：CheckBox 种类自带勾选态，
-            // 勾上 = 启用、空 = 禁用，「按下后直接切换」。Label 创建后不可改，
-            // 所以状态展示靠 IsChecked 而不是换文字 —— 每次弹出前刷新。
+            // 拖动层开关（2026-09-14 用户要求）：CheckBox 自带勾选态，「按下后直接切换」。
+            // Label 创建后不可改，所以状态展示靠 IsChecked 而不是换文字 —— 每次弹出前刷新。
             var strip = _dragStripMenuItem;
             if (strip is null)
             {
@@ -882,11 +815,8 @@ public partial class MainWindow : System.Windows.Window
             }
             strip.IsChecked = _config.DragStripEnabled;
 
-            // 只「追加」，不「接管」。SDK 语义（ICoreWebView2_11.ContextMenuRequested）：
-            //   "If the host doesn't handle the event, WebView will display the default
-            //    context menu."
-            // 一旦 args.Handled = true，即声明菜单由宿主自行呈现，WebView2 便不再显示任何菜单；
-            // 而本类并不创建自己的菜单 —— 那样右键会完全没有反应。
+            // 只「追加」不「接管」：一旦 args.Handled = true 即声明菜单由宿主呈现，WebView2
+            // 便不再显示任何菜单，而本类并不创建自己的菜单 —— 那样右键会完全没反应。
             // §7.5 要求的是「追加一项」，因此必须保持 Handled = false（默认值）。
             args.MenuItems.Insert(args.MenuItems.Count, item);
             args.MenuItems.Insert(args.MenuItems.Count, strip);
@@ -894,19 +824,17 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 右键菜单切换拖动层。与设置窗口「保存」同一条生效路径（<see cref="ApplyAppearance"/>），
-    /// 并立即落盘 —— 不然重启后又回到旧状态，用户会觉得开关"记不住"。
-    /// <para>
-    /// 共享的 <c>_settings</c>（SettingsViewModel）也要同步：设置窗口直接绑它，
-    /// 若窗口开着，复选框要立即反映新状态；其后再点「保存」也不会把旧值写回去。
-    /// </para>
+    /// 右键菜单切换拖动层。与设置窗口「保存」同一条生效路径（<see cref="ApplyAppearance"/>）
+    /// 并立即落盘 —— 不然重启后又回到旧状态，用户会觉得开关"记不住"。共享的 <c>_settings</c>
+    /// 也要同步：设置窗口直接绑它，若窗口开着复选框要立即反映新状态，其后再点「保存」
+    /// 也不会把旧值写回去。
     /// </summary>
     private void ToggleDragStripFromMenu()
     {
         _config = _config with { DragStripEnabled = !_config.DragStripEnabled };
         _settings.DragStripEnabled = _config.DragStripEnabled;
 
-        // 与 OnConfigSaved/OnClosing 一致：先并入当前窗口几何再落盘，避免把旧坐标写回 config.json。
+        // 与 OnConfigSaved/OnClosing 一致：先并入当前窗口几何再落盘，避免把旧坐标写回。
         _config = _shell.ApplyTo(_config);
         _configStore.Save(_config);
 
