@@ -33,6 +33,16 @@ public partial class MainWindow : System.Windows.Window
     private WebView2? _hwndView;
     private WebView2CompositionControl? _compositionView;
 
+    /// <summary>
+    /// 最小化期间被我们隐藏的 WebView2 顶层窗口（Chrome_WidgetWin_1）：主窗口收起后
+    /// 它仍留在原位挡住桌面鼠标，最小化时藏掉、还原时放回。
+    /// </summary>
+    private readonly List<IntPtr> _ghostWebViewHwnds = new();
+
+    /// <summary>最近一次非最小化时的窗口矩形：最小化后实时矩形已是 -32000，匹配只能靠它。</summary>
+    private NativeRect _lastVisibleRect;
+    private bool _hasLastVisibleRect;
+
     // ---- 拖动热区手势判别（备选1·透传点击）----
     // 合成版宿主必须捕获鼠标才能拖动窗口，因此改用手势判别：快速点按 → 把这次点击
     // 合成转发给页面；按下后拖动超过阈值 → 拖动窗口。四个字段只在左键按下期间有效。
@@ -127,7 +137,7 @@ public partial class MainWindow : System.Windows.Window
         RestoreWindowPosition();
         ApplyAppearance();
 
-        ChromeBar.MinimizeRequested += (_, _) => WindowState = WindowState.Minimized;
+        ChromeBar.MinimizeRequested += (_, _) => MinimizeViaSystemCommand();
         ChromeBar.MaximizeRequested += (_, _) => ToggleMaximize();
         ChromeBar.CloseRequested += (_, _) => Close();
 
@@ -140,7 +150,9 @@ public partial class MainWindow : System.Windows.Window
         {
             UpdateDragStrip();
             ApplyMaximizedContentInset();
+            CacheVisibleRect();
         };
+        LocationChanged += (_, _) => CacheVisibleRect();
         StateChanged += OnStateChanged;
         // 初始状态也要归一：RestoreWindowPosition 可能已把 WindowState 设成 Maximized，
         // 而那时还没订阅 StateChanged，不补这一下会留下"带边框 + 缩放热区"的不一致状态。
@@ -705,6 +717,8 @@ public partial class MainWindow : System.Windows.Window
 
     private const int WmNcLButtonDown = 0x00A1;
     private const int HTCaption = 0x02;
+    private const int WmSysCommand = 0x0112;
+    private const int ScMinimize = 0xF020;
 
     [DllImport("user32.dll", CharSet = CharSet.Auto)]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
@@ -730,6 +744,10 @@ public partial class MainWindow : System.Windows.Window
 
     private void OnStateChanged(object? sender, EventArgs e)
     {
+        var minimized = WindowState == WindowState.Minimized;
+        if (!minimized)
+            CacheVisibleRect();
+
         var maximized = WindowState == WindowState.Maximized;
         // hwnd 模式已摘掉 WindowChrome，此时 _winChrome 为 null —— 缩放热区由系统标题栏接管。
         if (System.Windows.Shell.WindowChrome.GetWindowChrome(this) is { } chrome)
@@ -740,6 +758,238 @@ public partial class MainWindow : System.Windows.Window
 
         // 状态与尺寸两条路径都算一次（幂等，谁后到谁生效）。
         ApplyMaximizedContentInset();
+
+        // composition 宿主的输入窗口是顶层窗口，不随主窗口最小化而收起，会挡住桌面鼠标。
+        if (minimized)
+            HideGhostWebViewWindows();
+        else
+            RestoreGhostWebViewWindows();
+    }
+
+    /// <summary>记录非最小化状态下的窗口矩形，供最小化后匹配 WebView2 顶层窗口用。</summary>
+    private void CacheVisibleRect()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        // 最小化中实时矩形是 -32000 哨兵值，不能缓存
+        if (hwnd == IntPtr.Zero || !GetWindowRect(hwnd, out var r) || IsIconic(hwnd))
+            return;
+        _lastVisibleRect = r;
+        _hasLastVisibleRect = true;
+    }
+
+    /// <summary>最小化时隐藏 WebView2 的顶层输入窗口。</summary>
+    private void HideGhostWebViewWindows()
+    {
+        // 句柄可能已被 WebView2 销毁（句柄复用很常见），先清掉再重新找。
+        _ghostWebViewHwnds.RemoveAll(h => !IsWindow(h));
+        if (_ghostWebViewHwnds.Count > 0)
+            return; // 上次藏的还活着，别重复处理
+
+        _ghostWebViewHwnds.AddRange(FindGhostWebViewWindows());
+        foreach (var hwnd in _ghostWebViewHwnds)
+            ShowWindow(hwnd, SW_HIDE);
+        if (_ghostWebViewHwnds.Count > 0)
+            _runLog?.Append($"[shell] 最小化：已隐藏 {_ghostWebViewHwnds.Count} 个 WebView2 顶层窗口");
+    }
+
+    /// <summary>还原时把先前藏掉的 WebView2 顶层窗口成对放回。</summary>
+    private void RestoreGhostWebViewWindows()
+    {
+        if (_ghostWebViewHwnds.Count == 0)
+            return;
+        var restored = 0;
+        foreach (var hwnd in _ghostWebViewHwnds)
+        {
+            // 句柄可能已被 WebView2 销毁；IsWindow 过滤，避免把复用的句柄错误地显示出来。
+            if (!IsWindow(hwnd))
+                continue;
+            ShowWindow(hwnd, SW_SHOW);
+            restored++;
+        }
+        _ghostWebViewHwnds.Clear();
+        if (restored > 0)
+            _runLog?.Append($"[shell] 还原：已恢复 {restored} 个 WebView2 顶层窗口");
+    }
+
+    /// <summary>
+    /// 枚举要隐藏的 WebView2 顶层输入窗口：类名 Chrome_WidgetWin_1、无父窗口、属于本应用
+    /// 拉起的 msedgewebview2 进程树、且矩形与最小化前的窗口客户区重合。
+    /// </summary>
+    private List<IntPtr> FindGhostWebViewWindows()
+    {
+        var result = new List<IntPtr>();
+        if (!_hasLastVisibleRect)
+            return result;
+        var webviewPids = CollectWebView2ProcessIds();
+        if (webviewPids.Count == 0)
+            return result;
+
+        EnumWindows((h, _) =>
+        {
+            GetWindowThreadProcessId(h, out var pid);
+            if (!webviewPids.Contains(pid))
+                return true;
+            var sb = new System.Text.StringBuilder(64);
+            if (GetClassName(h, sb, 64) == 0 || sb.ToString() != "Chrome_WidgetWin_1")
+                return true;
+            if (!IsWindowVisible(h) || GetParent(h) != IntPtr.Zero || !GetWindowRect(h, out var r))
+                return true;
+
+            // 矩形重合才算：最大化时窗口会外扩一圈系统边框（本机 8px），容差必须盖住它。
+            if (Math.Abs(r.Left - _lastVisibleRect.Left) > 16 || Math.Abs(r.Top - _lastVisibleRect.Top) > 16 ||
+                Math.Abs(r.Right - _lastVisibleRect.Right) > 16 || Math.Abs(r.Bottom - _lastVisibleRect.Bottom) > 16)
+                return true;
+
+            result.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return result;
+    }
+
+    /// <summary>
+    /// 单次进程快照里收集本应用拉起的全部 msedgewebview2 进程 id。browser 进程由本进程
+    /// 直接拉起，GPU/渲染等子进程再挂在 browser 进程下 —— 沿父链向上即可认领整棵树。
+    /// </summary>
+    private static HashSet<uint> CollectWebView2ProcessIds()
+    {
+        var snapshot = BuildProcessSnapshot();
+        var self = (uint)Environment.ProcessId;
+        var parentOf = new Dictionary<uint, uint>(snapshot.Count);
+        foreach (var (_, pid, ppid) in snapshot)
+            parentOf[pid] = ppid;
+
+        var ids = new HashSet<uint>();
+        foreach (var (name, pid, _) in snapshot)
+        {
+            if (!name.Equals("msedgewebview2.exe", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var current = pid;
+            for (var depth = 0; depth < 8; depth++)
+            {
+                if (!parentOf.TryGetValue(current, out var parent) || parent == 0)
+                    break;
+                if (parent == self)
+                {
+                    ids.Add(pid);
+                    break;
+                }
+                current = parent;
+            }
+        }
+        return ids;
+    }
+
+    /// <summary>Toolhelp32 进程快照：(进程名, pid, 父pid) 列表；失败返回空。</summary>
+    private static List<(string Name, uint Pid, uint ParentPid)> BuildProcessSnapshot()
+    {
+        var list = new List<(string, uint, uint)>(300);
+        var handle = CreateToolhelp32Snapshot(SnapshotFlagsProcess, 0);
+        if (handle == InvalidHandleValue)
+            return list;
+        try
+        {
+            var entry = new ProcessEntry32 { dwSize = (uint)Marshal.SizeOf<ProcessEntry32>() };
+            if (Process32First(handle, ref entry) != 0)
+                do
+                {
+                    list.Add((entry.szExeFile, entry.th32ProcessID, entry.th32ParentProcessID));
+                } while (Process32Next(handle, ref entry) != 0);
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+        return list;
+    }
+
+    private const uint SnapshotFlagsProcess = 0x00000002;
+    private static readonly IntPtr InvalidHandleValue = new(-1);
+
+    /// <summary>注意 pcPriClassBase 是 int：声明成 long 会让结构体多 4 字节（576≠568），
+    /// Process32First 直接返回 ERROR_BAD_LENGTH，快照每次都失败。</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ProcessEntry32
+    {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+
+    // Win32 BOOL 按 4 字节整数返回；声明为 int 并用 != 0 判断最直白。
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int Process32First(IntPtr snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int Process32Next(IntPtr snapshot, ref ProcessEntry32 entry);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    private const int SW_HIDE = 0;
+    private const int SW_SHOW = 5;
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder sb, int max);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetParent(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool ShowWindow(IntPtr hWnd, int cmd);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out NativeRect r);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    /// <summary>
+    /// 自绘三键的最小化：走 <c>WM_SYSCOMMAND/SC_MINIMIZE</c>，与系统标题栏同一条路径，
+    /// 交给 <c>DefWindowProc</c> 处理（含"把激活权交还给下一个窗口"）。
+    /// </summary>
+    private void MinimizeViaSystemCommand()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+        {
+            WindowState = WindowState.Minimized;
+            return;
+        }
+        SendMessage(hwnd, WmSysCommand, ScMinimize, IntPtr.Zero);
     }
 
     /// <summary>
