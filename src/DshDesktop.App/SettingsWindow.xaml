@@ -48,13 +48,15 @@
                 </Border>
 
                 <!-- ===== 控制台（设置页第二项；它仍是「现在发生了什么」的唯一出口）：错误信息（内联在
-                     标题行）、需要临时 URL 时的提示与输入框（NeedsToken 才出现）、控制台输出本身。 ===== -->
+                     标题行）、服务启停按钮与状态提示（2026-09-17 按参考图新增）、需要临时 URL 时的提示
+                     与输入框（NeedsToken 才出现）、控制台输出本身。 ===== -->
                 <Border x:Name="ConsoleArea" Style="{StaticResource SectionCardStyle}">
                     <StackPanel>
                         <Grid Margin="0,0,0,8">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
@@ -72,16 +74,57 @@
                                 <Run Text="错误：" FontWeight="Medium" />
                                 <Run Text="{Binding ErrorText, Mode=OneWay}" />
                             </TextBlock>
-                            <!-- 主动作分两档：清 Cookie 只丢登录态，清数据是整套本地存储。
-                                 都放在控制台标题行，因为它们的结果都只出现在控制台里（见 OnClearCookiesRequested）。
-                                 三种元素（标题 / 错误 / 按钮）统一 VerticalAlignment=Center：
-                                 按钮再高也只向上下对称伸展，文字中线一致，不会出现谁比谁低一截。 -->
+                            <!-- 服务启停按钮（2026-09-17 参考图 2 + 外部实例区分）：
+                                 关闭服务/重启服务仅在「本软件启动的实例在运行」（CanStopService）时可见 ——
+                                 外部实例我们没能力关也轮不到我们重启，亮出来就是撒谎的按钮；
+                                 启动服务仅在未运行时可见（互斥）。
+                                 ServiceChanging=true 时三个按钮一起置灰，避免同一条管线重复触发。
+                                 结果只出现在控制台（Note），不弹独立对话框。 -->
                             <Button Grid.Column="2" Style="{StaticResource SettingsButtonStyle}"
                                     Padding="12,4" VerticalAlignment="Center"
-                                    Content="清除 WebView 数据" Click="OnClearWebViewData"
-                                    ToolTip="清空缓存 / 本地存储 / IndexedDB 等全部浏览数据（含 Cookie，页面需刷新后才会体现）" />
+                                    Content="关闭服务" Click="OnStopService"
+                                    Visibility="{Binding CanStopService, Converter={StaticResource BoolVis}}"
+                                    IsEnabled="{Binding ServiceIdle}"
+                                    ToolTip="停止由本软件启动的本地服务进程（与关窗清场同一条 Job Object 路径）" />
                             <Button Grid.Column="3" Style="{StaticResource SettingsButtonStyle}"
                                     Padding="12,4" VerticalAlignment="Center" Margin="8,0,0,0"
+                                    Content="启动服务" Click="OnStartService"
+                                    Visibility="{Binding ServiceRunning, Converter={StaticResource BoolVis}, ConverterParameter=Invert}"
+                                    IsEnabled="{Binding ServiceIdle}"
+                                    ToolTip="按当前「启动命令」拉起本地服务，成功后自动打开页面" />
+                            <Button Grid.Column="4" Style="{StaticResource SettingsButtonStyle}"
+                                    Padding="12,4" VerticalAlignment="Center" Margin="8,0,0,0"
+                                    Content="重启服务" Click="OnRestartService"
+                                    Visibility="{Binding CanStopService, Converter={StaticResource BoolVis}}"
+                                    IsEnabled="{Binding ServiceIdle}"
+                                    ToolTip="先停止再按当前配置重新启动本地服务（仅对本软件启动的实例有效）" />
+                        </Grid>
+
+                        <!-- 服务状态提示（参考图 2：服务未启动时明确告知，避免用户以为"在设置里改完就自动起"）。
+                             文案/颜色由 .xaml.cs 的 ServiceStatusText/ServiceStatusBrush 驱动：
+                             未启动=警告色、已启动=主题色、变更中=次要色。 -->
+                        <Border Style="{StaticResource SectionCardStyle}"
+                                Margin="0,0,0,12" Padding="12,8"
+                                Background="{DynamicResource InputBackgroundBrush}"
+                                BorderBrush="{DynamicResource PanelBorderBrush}">
+                            <TextBlock Text="{Binding ServiceStatusText, Mode=OneWay}"
+                                       FontSize="12"
+                                       FontWeight="Medium"
+                                       Foreground="{Binding ServiceStatusBrush, Mode=OneWay}" />
+                        </Border>
+
+                        <!-- 数据清除按钮（原在控制台标题行；标题行被服务按钮占用后移到这里成独立行，
+                             与状态提示同卡片、结果都只出现在控制台）。 -->
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <Button Grid.Column="1" Style="{StaticResource SettingsButtonStyle}"
+                                    Content="清除 WebView 数据" Click="OnClearWebViewData"
+                                    ToolTip="清空缓存 / 本地存储 / IndexedDB 等全部浏览数据（含 Cookie，页面需刷新后才会体现）" />
+                            <Button Grid.Column="2" Style="{StaticResource SettingsButtonStyle}"
                                     Content="清除 Cookie" Click="OnClearCookies"
                                     ToolTip="只清空 WebView2 的全部 Cookie（页面需刷新后才会体现为登出）" />
                         </Grid>

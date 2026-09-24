@@ -29,6 +29,7 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
 
     private readonly SettingsViewModel _vm;
     private readonly SessionViewModel _session;
+    private readonly AppConfig _config;
     private SessionPhase _lastPhase;
 
     /// <summary>点「保存」且校验通过时抛出；由 MainWindow 落盘并即时套用外观。</summary>
@@ -41,16 +42,26 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
     /// <summary>点「清除 WebView 数据」时抛出；真正的清理发生在 Shell 层。</summary>
     public event Action? ClearWebViewDataRequested;
 
+    /// <summary>点「关闭服务」时抛出；真正的进程树关闭发生在 Shell 层（MainWindow）。</summary>
+    public event Action? StopServiceRequested;
+
+    /// <summary>点「启动服务」时抛出；Shell 层负责按当前配置拉起服务并自动打开页面。</summary>
+    public event Action? StartServiceRequested;
+
+    /// <summary>点「重启服务」时抛出；Shell 层先停再启，并在成功后自动打开页面。</summary>
+    public event Action? RestartServiceRequested;
+
     /// <summary>用户提交临时 URL 时抛出；Shell 层据此等待导航完成，成功后清除错误并关窗 —— 导航是否成功只有 WebView2 知道。</summary>
     public event Action? TempUrlSubmitted;
 
-    public SettingsWindow(SettingsViewModel vm, SessionViewModel session)
+    public SettingsWindow(SettingsViewModel vm, SessionViewModel session, AppConfig config)
     {
         InitializeComponent();
         // 版本号在这里露出：主窗口标题栏保持纯标题，两种宿主模式下都不带版本后缀。
         Title = $"设置 - DSH Desktop Webview {AppVersion.Short}";
         _vm = vm;
         _session = session;
+        _config = config;
         _lastPhase = session.Phase;
 
         DataContext = _vm;
@@ -63,6 +74,9 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
             // 关窗即丢弃未保存的编辑；不回退的话下次打开会看到「改了但没保存」的幽灵字段。
             _vm.RevertToSnapshot();
         };
+
+        // 打开设置窗口时先探测一次服务状态，让「服务未启动/服务已启动」提示一进来就是最新的。
+        _ = _session.RefreshServiceStateNoGuardAsync(config, CancellationToken.None);
     }
 
     // ================= 错误条 / 控制台的数据源（其 DataContext = 本窗口） =================
@@ -75,6 +89,46 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
 
     public Visibility NeedsTokenVisibility =>
         _session.Phase == SessionPhase.NeedsToken ? Visibility.Visible : Visibility.Collapsed;
+
+    /// <summary>
+    /// 服务状态提示文案（四态：未启动 / 已启动（本软件启动的实例）/ 复用外部实例 / 正在变更中）。
+    /// 归属区分：端口可达但 <see cref="SessionViewModel.ServiceOwned"/> 为 false = 外部已有的实例，
+    /// 本软件只是复用它（没有关闭它的能力）。
+    /// </summary>
+    public string ServiceStatusText =>
+        _session.ServiceChanging
+            ? "正在变更服务状态…"
+            : !_session.ServiceRunning
+                ? "服务未启动"
+                : _session.ServiceOwned
+                    ? "服务已启动"
+                    : "复用外部实例";
+
+    /// <summary>服务状态提示颜色：未启动=警告色、已启动=主题色、复用外部实例=次要色、变更中=更次要色。绑定单向，无 setter。</summary>
+    public System.Windows.Media.Brush ServiceStatusBrush =>
+        _session.ServiceChanging
+            ? FindResource("SubtleTextBrush") as System.Windows.Media.Brush
+                   ?? System.Windows.Media.Brushes.Gray
+            : !_session.ServiceRunning
+                ? FindResource("ErrorTextBrush") as System.Windows.Media.Brush
+                      ?? System.Windows.Media.Brushes.Red
+                : _session.ServiceOwned
+                    ? FindResource("TextBrush") as System.Windows.Media.Brush
+                          ?? System.Windows.Media.Brushes.Black
+                    : FindResource("SubtleTextBrush") as System.Windows.Media.Brush
+                          ?? System.Windows.Media.Brushes.Gray;
+
+    /// <summary>服务是否在运行：转发 <see cref="SessionViewModel.ServiceRunning"/>，「启动服务」按钮的可见性用它。</summary>
+    public bool ServiceRunning => _session.ServiceRunning;
+
+    /// <summary>
+    /// 是否「可关闭」= 在运行 **且是本软件启动的实例**。「关闭服务」按钮的可见性用它：
+    /// 外部实例我们没有关闭它的能力（Kill 只作用于自己拉起的进程树），不能亮出会撒谎的按钮。
+    /// </summary>
+    public bool CanStopService => _session.ServiceRunning && _session.ServiceOwned;
+
+    /// <summary>服务状态变化是否已结束：转发 <see cref="SessionViewModel.ServiceIdle"/>，三个服务按钮的 IsEnabled 用它。</summary>
+    public bool ServiceIdle => _session.ServiceIdle;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -89,6 +143,12 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
             RaiseBinding(nameof(ErrorText));
             RaiseBinding(nameof(ConsoleText));
             RaiseBinding(nameof(NeedsTokenVisibility));
+            RaiseBinding(nameof(ServiceStatusText));
+            RaiseBinding(nameof(ServiceStatusBrush));
+            RaiseBinding(nameof(_session.ServiceRunning));
+            RaiseBinding(nameof(_session.ServiceOwned));
+            RaiseBinding(nameof(CanStopService));
+            RaiseBinding(nameof(_session.ServiceIdle));
 
             // 刚进入 NeedsToken：把控制台（临时 URL 输入框在里面）带到眼前。
             // 控制台整栏在滚动区最前面，所以是 ScrollToTop —— 它在最下面时要写 ScrollToEnd。
@@ -143,6 +203,15 @@ public partial class SettingsWindow : System.Windows.Window, INotifyPropertyChan
 
     private void OnClearWebViewData(object sender, RoutedEventArgs e) =>
         ClearWebViewDataRequested?.Invoke();
+
+    private void OnStopService(object sender, RoutedEventArgs e) =>
+        StopServiceRequested?.Invoke();
+
+    private void OnStartService(object sender, RoutedEventArgs e) =>
+        StartServiceRequested?.Invoke();
+
+    private void OnRestartService(object sender, RoutedEventArgs e) =>
+        RestartServiceRequested?.Invoke();
 
     /// <summary>控制台高度捏手：WPF 的 TextBox 自身没有缩放能力，用一个贴底的 Thumb 手改 Height；上限取窗口可用高度，太矮时先夹一次保证区间有效。</summary>
     private void OnConsoleGripDrag(object sender, DragDeltaEventArgs e)

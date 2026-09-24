@@ -21,6 +21,7 @@ public partial class MainWindow : System.Windows.Window
     private readonly SettingsViewModel _settings;
     private readonly ConfigStore _configStore;
     private readonly WebViewProbe _probe;
+    private readonly CommandLauncher? _launcherRef;
     private readonly string _webViewProfilePath;
     private readonly RunLog? _runLog;
     private SettingsWindow? _settingsWindow;
@@ -79,6 +80,14 @@ public partial class MainWindow : System.Windows.Window
     private bool _pendingRealNav;
     private long _realNavId = -1;
 
+    /// <summary>
+    /// 真实导航失败后的重试预算与目标：冷启动时 <c>dsh web</c> 打印 URL 早于端口开始 LISTEN，
+    /// 首次导航必然失败（见 <see cref="OnNavigateRequested"/>）。只重试一次，避免坏 URL 死循环。
+    /// </summary>
+    private const int NavigationRetryDelayMs = 1500;
+    private string? _lastRealNavUrl;
+    private int _realNavRetriesLeft;
+
     public MainWindow(
         AppConfig config,
         ShellViewModel shell,
@@ -87,7 +96,8 @@ public partial class MainWindow : System.Windows.Window
         ConfigStore configStore,
         WebViewProbe probe,
         string webViewProfilePath,
-        RunLog? runLog = null)
+        RunLog? runLog = null,
+        CommandLauncher? launcher = null)
     {
         InitializeComponent();
         _config = config;
@@ -98,6 +108,7 @@ public partial class MainWindow : System.Windows.Window
         _probe = probe;
         _webViewProfilePath = webViewProfilePath;
         _runLog = runLog;
+        _launcherRef = launcher;
 
         // 窗口最小 500×500：拦住拖拽缩小的下限（异常值判定见 MinWindowWidth 注释）。
         MinWidth = MinWindowWidth;
@@ -1118,13 +1129,26 @@ public partial class MainWindow : System.Windows.Window
     /// 崩了就记一行日志并放弃这一次导航；重建由 <c>ProcessFailed</c> 的恢复逻辑负责，
     /// 不在这里硬试。
     /// </para>
+    /// <para>
+    /// 失败会给一次重试：<c>dsh web</c> **先打印 URL、端口晚约 1 秒才开始 LISTEN**
+    /// （2026-09-24 实测：URL 行后 7ms 导航 → <c>IsSuccess=False</c>；端口在启动后约 6.8s 才 LISTEN），
+    /// 冷启动时首次导航必然撞上这个空窗，页面会停在连接错误页。
+    /// </para>
     /// </summary>
     private void OnNavigateRequested(string url)
+    {
+        _lastRealNavUrl = url;
+        _realNavRetriesLeft = 1;
+        NavigateCore(url, "正在打开页面…");
+    }
+
+    /// <summary>发起一次真实导航。<paramref name="overlayMessage"/> 是加载浮层文案。</summary>
+    private void NavigateCore(string url, string overlayMessage)
     {
         // 只有会话显式发起的这次导航是"真实导航"；它的 NavigationCompleted
         // 才是加载浮层消失的时刻（探测的导航不算，见 OnCoreNavigationStarting）
         _pendingRealNav = true;
-        ShowLoadingOverlay("正在打开页面…");
+        ShowLoadingOverlay(overlayMessage);
         _runLog?.Append($"[nav] 导航到 {LogRedaction.Url(url)}");
         Dispatcher.Invoke(() =>
         {
@@ -1222,6 +1246,8 @@ public partial class MainWindow : System.Windows.Window
             _realNavId = -1;
             _runLog?.Append($"[nav] 页面加载完成（IsSuccess={e.IsSuccess}），收起加载浮层");
             HideLoadingOverlay();
+            if (!e.IsSuccess && _realNavRetriesLeft > 0 && _lastRealNavUrl is not null)
+                ScheduleRealNavRetry(_lastRealNavUrl);
         }
 
         if (!_awaitTempUrlNavigation)
@@ -1239,6 +1265,23 @@ public partial class MainWindow : System.Windows.Window
         _settingsWindow?.Close();
     }
 
+    /// <summary>
+    /// 真实导航失败后延迟重试一次（冷启动时端口尚未 LISTEN，见 <see cref="OnNavigateRequested"/>）。
+    /// 期间用户可能已提交临时 URL 或点了别的导航 —— 目标变了就放弃，别抢用户的导航。
+    /// </summary>
+    private async void ScheduleRealNavRetry(string url)
+    {
+        _realNavRetriesLeft--;
+        _runLog?.Append($"[nav] 首次导航未成功（端口可能尚未开始监听），{NavigationRetryDelayMs}ms 后重试一次");
+        await Task.Delay(NavigationRetryDelayMs);
+
+        if (_lastRealNavUrl != url || _pendingRealNav)
+            return;
+
+        _runLog?.Append("[nav] 重试导航");
+        NavigateCore(url, "正在重新连接服务…");
+    }
+
     private void OpenSettings()
     {
         if (_settingsWindow is { IsLoaded: true })
@@ -1247,16 +1290,22 @@ public partial class MainWindow : System.Windows.Window
             return;
         }
 
-        var window = new SettingsWindow(_settings, _session);
+        var window = new SettingsWindow(_settings, _session, _config);
         window.ConfigSaved += OnConfigSaved;
         window.ClearCookiesRequested += OnClearCookiesRequested;
         window.ClearWebViewDataRequested += OnClearWebViewDataRequested;
         window.TempUrlSubmitted += () => _awaitTempUrlNavigation = true;
+        window.StartServiceRequested += OnStartServiceRequested;
+        window.StopServiceRequested += OnStopServiceRequested;
+        window.RestartServiceRequested += OnRestartServiceRequested;
         window.Closed += (_, _) =>
         {
             window.ConfigSaved -= OnConfigSaved;
             window.ClearCookiesRequested -= OnClearCookiesRequested;
             window.ClearWebViewDataRequested -= OnClearWebViewDataRequested;
+            window.StartServiceRequested -= OnStartServiceRequested;
+            window.StopServiceRequested -= OnStopServiceRequested;
+            window.RestartServiceRequested -= OnRestartServiceRequested;
             // 窗口被关掉（无论哪条路径）就不再等它的导航，否则之后一次无关的成功导航
             // 会误触发"关窗"逻辑（虽然那时窗口已关，ClearError 仍会错误地清掉提示）。
             _awaitTempUrlNavigation = false;
@@ -1338,6 +1387,197 @@ public partial class MainWindow : System.Windows.Window
         catch (Exception ex)
         {
             _session.Note($"清除 WebView 数据失败：{ex.Message}");
+        }
+    }
+
+    // ================= 服务启停（设置窗口 2026-09-17） =================
+
+    /// <summary>
+    /// 真正把服务进程停掉的公共入口（设置窗口「关闭服务」「重启服务」都走这里）。
+    /// <para>
+    /// 服务是我们主动拉起的子进程，关窗时靠 Job Object 的 <c>KILL_ON_JOB_CLOSE</c>
+    /// 原子清场；设置窗口里的「关闭服务」不能等到关窗才生效，所以这里要显式把它结束掉 ——
+    /// 同时关掉 Job Object（它会连带收掉整棵子进程树）。
+    /// </para>
+    /// <para>
+    /// 返回「停止后端口是否仍可达」：可达 = 占用者是外部进程（本软件没拉起过它，或
+    /// 我们拉起的已退出、外部实例接管了端口）。调用方要拿它决定状态行的归属 ——
+    /// 保留 running + 归属清零 =「复用外部实例」，而不是谎报「已停止」。
+    /// </para>
+    /// </summary>
+    private async Task<bool> StopLaunchedServiceAsync()
+    {
+        _runLog?.Append("[shell] 设置窗口请求停止服务");
+
+        // 走我们自己的 CommandLauncher：它持有被拉起的进程句柄与 Job Object。
+        if (_launcherRef is { } launcher)
+            launcher.Kill();
+
+        // 给进程一个短暂的退出窗口（不阻塞太久，这是用户交互路径上的等待）。
+        await Task.Delay(500);
+
+        try
+        {
+            var probe = await _probe.ProbeAsync(_config.DefaultUrl, CancellationToken.None);
+            // 有应答（含 401）就算仍可达：401 只是要 token，说明进程还活着。
+            var stillReachable = probe.Outcome != ProbeOutcome.Unreachable;
+            if (stillReachable)
+                _runLog?.Append("[probe] 停止后端口仍可达，服务可能由外部进程托管");
+            return stillReachable;
+        }
+        catch
+        {
+            // 探测异常：多半就是"停掉了"。
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 停止服务（设置窗口「关闭服务」）。真正的进程树结束在 <see cref="StopLaunchedServiceAsync"/>，
+    /// 结果只写控制台（Note），不弹独立对话框 —— 状态行 + 控制台就是这个项目的输出出口。
+    /// 停止后端口仍可达 = 外部实例：如实保留 running、归属清零。
+    /// </summary>
+    private async void OnStopServiceRequested()
+    {
+        try
+        {
+            var stillReachable = await StopLaunchedServiceAsync();
+            _session.CompleteStopService(stillReachable,
+                stillReachable
+                    ? "服务仍可访问：当前实例由外部进程托管，本软件无法关闭它"
+                    : "服务已停止（子进程树已结束）");
+        }
+        catch (Exception ex)
+        {
+            _runLog?.Append($"[shell] 停止服务失败：{ex.GetType().Name}: {ex.Message}");
+            _session.CompleteStopService(false, $"停止服务失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 启动/重启后的确认探测，必须重试：<c>dsh web</c> 先打印 URL、端口晚约 1.5~2 秒才开始
+    /// LISTEN（2026-09-24 实机：URL 行 19:55:32.602，页面重试导航 19:55:34.513 才成功），
+    /// 单次探测必然落在这个窗口里探到 <see cref="ProbeOutcome.Unreachable"/>，把一次成功的启动
+    /// 误报成「服务未启动」。这里重试到有应答为止，预算约 6 秒（5 次，间隔 1.5s）；
+    /// 预算用尽仍不可达 = 真的没起来，交给调用方按失败处理。
+    /// </summary>
+    private async Task<ProbeResult> ProbeAfterStartAsync(string url)
+    {
+        const int maxAttempts = 5;
+        const int retryDelayMs = 1500;
+
+        var result = await _probe.ProbeAsync(url, CancellationToken.None);
+        for (var attempt = 1; attempt < maxAttempts && result.Outcome == ProbeOutcome.Unreachable; attempt++)
+        {
+            _runLog?.Append($"[probe] 启动后探测未应答（第 {attempt} 次重试），{retryDelayMs}ms 后再试");
+            await Task.Delay(retryDelayMs);
+            result = await _probe.ProbeAsync(url, CancellationToken.None);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 启动服务（设置窗口「启动服务」）。用当前生效配置（可能已被设置窗口就地改过，但「保存」前
+    /// 不落盘）：用户点「启动」的意图永远是"按我刚刚在设置里改的那套来"。成功后自动打开页面 ——
+    /// 与会话启动管线里「抓到 URL → 导航」是同一件事，只是这次由用户手动触发。
+    /// </summary>
+    private async void OnStartServiceRequested()
+    {
+        try
+        {
+            var cfg = _shell.ApplyTo(_config);
+            await _session.StartServiceAsync(cfg, CancellationToken.None);
+
+            var probe = await ProbeAfterStartAsync(cfg.DefaultUrl);
+            // 状态判定用 != Unreachable：裸 DefaultUrl 常返回 401（要 token），那是"服务活着"而非"没启动"。
+            if (probe.Outcome != ProbeOutcome.Unreachable)
+            {
+                // 只有 200 才自动导航到裸 URL —— 401 说明还缺 token，此刻跳过去只会用 401 页
+                // 盖掉启动管线里已经导航的带 token 页面。
+                if (probe.Outcome == ProbeOutcome.Ok)
+                {
+                    _runLog?.Append("[nav] 服务已就绪，自动打开页面");
+                    OnNavigateRequested(cfg.DefaultUrl);
+                }
+                else
+                {
+                    _runLog?.Append($"[probe] 服务有应答但非 200（outcome={probe.Outcome}），不覆盖当前页面");
+                }
+                // StartServiceAsync 内部已摆好归属：预探测可达（外部已有实例）→ 复用；
+                // 我们拉起且后探测可达 → 我们的实例。文案跟随归属。
+                _session.CompleteStartService(true,
+                    _session.ServiceOwned ? "服务已启动" : "服务已在运行（外部实例）");
+            }
+            else
+            {
+                _session.CompleteStartService(false, "服务启动未完成：端口仍不可访问");
+            }
+        }
+        catch (Exception ex)
+        {
+            _runLog?.Append($"[shell] 启动服务失败：{ex.GetType().Name}: {ex.Message}");
+            _session.CompleteStartService(false, $"启动服务失败：{ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 重启服务（设置窗口「重启服务」）：先停再启。若服务没在跑，<see cref="StopLaunchedServiceAsync"/>
+    /// 是安全的空操作，整体退化成一次「启动」。成功后同样自动打开页面。
+    /// <para>
+    /// 停止后端口仍可达 = 外部实例：我们没有能力停掉它（Kill 只作用于自己拉起的进程树），
+    /// 重启无从谈起 —— 如实保留状态并说明，而不是空转一轮「已停止 → 已重启」。
+    /// </para>
+    /// </summary>
+    private async void OnRestartServiceRequested()
+    {
+        try
+        {
+            _runLog?.Append("[shell] 设置窗口请求重启服务");
+
+            var stillReachable = await StopLaunchedServiceAsync();
+            if (stillReachable)
+            {
+                // 端口仍可达 = 外部实例：我们没有能力停掉它（Kill 只作用于自己拉起的进程树），
+                // 重启无从谈起。CompleteStopService 会摆正状态（running=true, owned=false）——
+                // 这里不能走下面的启动管线，否则「重启」会谎称把外部实例重启了。
+                _session.CompleteStopService(true,
+                    "服务仍可访问：当前实例由外部进程托管，本软件无法重启它");
+                return;
+            }
+            _session.CompleteStopAttempt();
+            _session.Note("服务已停止，正在重新启动…");
+
+            // 不再走带 ServiceChanging 守卫的 StartServiceAsync：守卫在这里由我们手动持有
+            // （CompleteStopAttempt 刚复位过一次，下面 TryStartServiceNoGuardAsync 不再动它）。
+            var cfg = _shell.ApplyTo(_config);
+            await _session.TryStartServiceNoGuardAsync(cfg, CancellationToken.None);
+
+            var probe = await ProbeAfterStartAsync(cfg.DefaultUrl);
+            if (probe.Outcome != ProbeOutcome.Unreachable)
+            {
+                // 同「启动服务」：401 等非 200 只代表缺 token，别用 401 页盖掉带 token 的页面。
+                if (probe.Outcome == ProbeOutcome.Ok)
+                {
+                    _runLog?.Append("[nav] 重启后服务已就绪，自动打开页面");
+                    OnNavigateRequested(cfg.DefaultUrl);
+                }
+                else
+                {
+                    _runLog?.Append($"[probe] 重启后有应答但非 200（outcome={probe.Outcome}），不覆盖当前页面");
+                }
+                _session.CompleteStartService(true,
+                    _session.ServiceOwned ? "服务已重启" : "服务由外部实例提供，保持运行");
+            }
+            else
+            {
+                _session.CompleteStartService(false, "服务重启未完成：端口仍不可访问");
+            }
+        }
+        catch (Exception ex)
+        {
+            _runLog?.Append($"[shell] 重启服务失败：{ex.GetType().Name}: {ex.Message}");
+            _session.CompleteStartService(false, $"重启服务失败：{ex.Message}");
         }
     }
 

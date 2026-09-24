@@ -106,9 +106,11 @@ public partial class App : System.Windows.Application
 
         shell.RestoreFrom(config);
 
+        // launcher 单独传给 MainWindow：设置窗口的「关闭服务」要能直接结束我们拉起的
+        // 服务进程（Job Object 在那条路径上不能等到关窗才生效）。
         var mainWindow = new MainWindow(
             config, shell, session, settings, configStore, probe,
-            DataPaths.ProfileDir, _runLog);
+            DataPaths.ProfileDir, _runLog, launcher);
         MainWindow = mainWindow;
         mainWindow.Closed += (_, _) => Shutdown();
         mainWindow.Show();

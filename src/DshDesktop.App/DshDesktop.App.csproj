@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.0.1</Version>
+    <Version>1.0.2</Version>
     <AssemblyName>DSH-Desktop-Webview</AssemblyName>
     <RootNamespace>DshDesktop.App</RootNamespace>
     <ApplicationIcon>app.ico</ApplicationIcon>

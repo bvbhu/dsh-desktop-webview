@@ -34,6 +34,7 @@ public sealed class FakeLauncher : IServerLauncher, IDisposable
     public LaunchResult Result { get; set; } = new(null, false, string.Empty);
     public List<string> OutputLines { get; } = new();
     public bool Disposed { get; private set; }
+    public int KillCount;
 
     public Task<LaunchResult> LaunchAsync(AppConfig cfg, IProgress<string> output, CancellationToken ct)
     {
@@ -41,6 +42,10 @@ public sealed class FakeLauncher : IServerLauncher, IDisposable
             output.Report(line);
         return Task.FromResult(Result);
     }
+
+    // IServerLauncher 没有 Kill：这是 CommandLauncher 的具体成员（设置窗口「关闭服务」用）。
+    // FakeLauncher 补上它，让 MainWindow 的停服路径在测试里也能拿到同一个假实现。
+    public void Kill() => KillCount++;
 
     public void Dispose() => Disposed = true;
 }
@@ -93,7 +98,8 @@ public class SessionViewModelTests
         vm.Phase.Should().Be(SessionPhase.Ready);
         navUrls.Should().ContainSingle().Which.Should().Be("http://127.0.0.1:3080/");
         configOpened.Should().Be(0);
-        probe.CallCount.Should().Be(1);
+        // 启动会话结束后还会再探测一次刷新服务状态（设置窗口状态提示用）。
+        probe.CallCount.Should().Be(2);
     }
 
     [Fact]
@@ -133,7 +139,8 @@ public class SessionViewModelTests
 
         await vm.StartSessionAsync(S2Config, CancellationToken.None);
 
-        probe.CallCount.Should().Be(2);
+        // 初始探测 + 回退探测 + 启动后的状态刷新探测 = 3 次。
+        probe.CallCount.Should().Be(3);
         probe.ProbedUrls[1].Should().Be("http://127.0.0.1:3080/");
         vm.Phase.Should().Be(SessionPhase.Ready);
         navUrls.Should().ContainSingle().Which.Should().Be("http://127.0.0.1:3080/");
@@ -159,7 +166,8 @@ public class SessionViewModelTests
 
         await vm.StartSessionAsync(S2Config, CancellationToken.None);
 
-        probe.CallCount.Should().Be(2);
+        // 初始探测 + 回退探测 + 启动后的状态刷新探测 = 3 次。
+        probe.CallCount.Should().Be(3);
         vm.Phase.Should().Be(SessionPhase.Failed);
         configOpened.Should().Be(1);
         navUrls.Should().BeEmpty();
@@ -339,7 +347,8 @@ public class SessionViewModelTests
 
         vm.Phase.Should().Be(SessionPhase.Ready);
         navUrls.Should().ContainSingle().Which.Should().Be("https://localhost:9999/");
-        probe.CallCount.Should().Be(0);
+        // S3 启动前不探测，但启动后会做一次状态刷新探测（设置窗口状态提示用）。
+        probe.CallCount.Should().Be(1);
     }
 
     [Fact]
@@ -973,5 +982,379 @@ public class SessionViewModelTests
         joined.Should().Contain("[nav] URL 形状：");
         joined.Should().Contain("路径段数=2");
         joined.Should().NotContain("SUPERSECRET42");
+    }
+
+    // ---- 服务启停（设置窗口 2026-09-17 新增） ----
+
+    [Fact]
+    public async Task StartService_AlreadyRunning_SkipsLaunch_AndSetsRunning()
+    {
+        // 探测在启动前后各跑一次：第一次就返回 Ok = 服务已经在跑，不应再拉起启动命令。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+        var lines = new List<string>();
+        vm.LogLine += lines.Add;
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        probe.CallCount.Should().Be(1, "服务已在运行时不应发起启动命令的前后各一次探测");
+        launcher.KillCount.Should().Be(0);
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeFalse("预探测 Ok = 外部已有实例，本软件从未启动过它 → 复用");
+        vm.ServiceChanging.Should().BeFalse();
+        string.Join("\n", lines).Should().Contain("服务已在运行");
+    }
+
+    [Fact]
+    public async Task StartService_NotRunning_LaunchesThenRefreshesState()
+    {
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null)); // 启动前：未启动
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));           // 启动后：已启动
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        probe.CallCount.Should().Be(2);
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue("我们拉起且后探测 Ok → 本软件启动的实例");
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task StartService_WhenAlreadyRunning_DoesNotNavigate()
+    {
+        // 「启动服务」只负责让服务跑起来；已运行时不应重复导航（会打断用户当前页面）。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        var launcher = new FakeLauncher();
+        using var vm = new SessionViewModel(probe, launcher);
+        var navUrls = new List<string>();
+        vm.NavigateRequested += url => navUrls.Add(url);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        navUrls.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task StartService_SessionAlreadyReady_DoesNotTouchStateMachine()
+    {
+        // 回归：会话已完成（Phase=Ready）后再点「启动服务」，启动管线不能再驱动状态机 ——
+        // 否则 _state.OnUrlExtracted 会在 Ready 阶段抛 InvalidOperationException，
+        // 被外层 catch 成标题行红字「OnUrlExtracted 仅允许在 Launching 调用」（2026-09-17 实机 bug）。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null)); // 启动前探测
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));           // 启动后探测
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        // 先让会话走完（NeverStart → 直接导航 → Ready），模拟"应用已在正常运行"的场景
+        await vm.StartSessionAsync(S1Config, CancellationToken.None);
+        vm.Phase.Should().Be(SessionPhase.Ready);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        vm.ErrorMessage.Should().BeNull("状态机越界异常不得被吞成用户可见的错误提示");
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task StartService_WhileChanging_IsIgnored()
+    {
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Unreachable, null, null) };
+        var gated = new GatedLauncher();
+        using var vm = new SessionViewModel(probe, gated);
+
+        var first = vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceChanging.Should().BeTrue();
+
+        // 第二次调用应被守卫直接挡掉（不抛异常、不进入状态机）
+        var act = async () => await vm.StartServiceAsync(S2Config, CancellationToken.None);
+        await act.Should().NotThrowAsync();
+
+        gated.Complete(new LaunchResult("http://x/", false, ""));
+        await first;
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_SetsRunningFromProbeOutcome()
+    {
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+        vm.ServiceRunning.Should().BeFalse("初始为未启动");
+
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeTrue();
+
+        probe.Result = new ProbeResult(ProbeOutcome.Unreachable, null, null);
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_WhileChanging_IsNoOp()
+    {
+        // 必须用 Unreachable：Ok 会让 StartServiceAsync 在启动前探测处直接短路，
+        // 永远到不了 GatedLauncher，守卫也就不会被持有。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Unreachable, null, null) };
+        var gated = new GatedLauncher();
+        using var vm = new SessionViewModel(probe, gated);
+
+        var start = vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceChanging.Should().BeTrue();
+
+        await vm.RefreshServiceStateNoGuardAsync(S2Config, CancellationToken.None);
+        vm.ServiceChanging.Should().BeTrue("刷新状态不应顺手复位守卫");
+
+        gated.Complete(new LaunchResult("http://x/", false, ""));
+        await start;
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    [Fact]
+    public void RequestStopService_RaisesEvent_AndHoldsGuardUntilCompletion()
+    {
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+        var stopRequested = 0;
+        vm.StopServiceRequested += () => stopRequested++;
+
+        vm.RequestStopService().Should().BeTrue();
+        stopRequested.Should().Be(1);
+        vm.ServiceChanging.Should().BeTrue("Shell 层还在停，守卫不能提前复位");
+
+        // 第二次请求应被守卫挡掉
+        vm.RequestStopService().Should().BeFalse();
+        stopRequested.Should().Be(1);
+
+        vm.CompleteStopService(stillReachable: false, "服务已停止");
+        vm.ServiceChanging.Should().BeFalse();
+        vm.ServiceRunning.Should().BeFalse();
+        vm.ServiceOwned.Should().BeFalse("停止后不可能是本软件启动的实例");
+        vm.ConsoleOutput.Should().Contain("服务已停止");
+    }
+
+    [Fact]
+    public void CompleteStartService_SetsRunning_AndRaisesNotifications()
+    {
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+        var raised = new List<string?>();
+        vm.PropertyChanged += (_, e) => raised.Add(e.PropertyName);
+
+        // 先持有守卫（模拟 Shell 层正在处理一次服务操作），否则 ServiceChanging=false 是
+        // 无变化的 no-op，ServiceIdle 根本不会触发。
+        vm.RequestStopService();
+        raised.Clear();
+
+        vm.CompleteStartService(true, "服务已启动");
+
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceChanging.Should().BeFalse();
+        raised.Should().Contain(nameof(SessionViewModel.ServiceRunning));
+        raised.Should().Contain(nameof(SessionViewModel.ServiceIdle));
+        vm.ConsoleOutput.Should().Contain("服务已启动");
+    }
+
+    [Fact]
+    public async Task CompleteStopService_StillReachable_KeepsRunningAndDropsOwnership()
+    {
+        // 模拟：本软件拉起了服务（owned=true），用户点「关闭服务」——但端口仍可达
+        // （外部进程占用 / 进程树没杀干净）。状态必须如实保留 running，归属清零 → 复用外部实例。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue();
+
+        // Shell 层停掉后探测仍可达 → CompleteStopService(stillReachable: true)
+        vm.CompleteStopService(stillReachable: true, "服务仍可访问：当前实例由外部进程托管，本软件无法关闭它");
+        vm.ServiceRunning.Should().BeTrue("端口仍可达，不能谎报已停止");
+        vm.ServiceOwned.Should().BeFalse("占用者已不是本软件启动的实例");
+        vm.ServiceChanging.Should().BeFalse();
+        vm.ConsoleOutput.Should().Contain("外部进程托管");
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_ExternalRunning_KeepsNotOwned()
+    {
+        // 全新 VM（从未启动过）+ 探测 Ok = 外部已有实例：running=true 但 owned=false → 复用。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeFalse("本软件从未启动过它，只能是外部实例");
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_OwnedInstance_KeepsOwned()
+    {
+        // 我们启动成功后（owned=true），再手动刷新（窗口重开）→ 归属应保持，不能变成外部实例。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceOwned.Should().BeTrue();
+
+        // 窗口重开 → 无守卫刷新（探测再次 Ok）
+        await vm.RefreshServiceStateNoGuardAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue("我们启动的实例还在跑，刷新不能把它误判成外部实例");
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_Unreachable_DropsRunningButKeepsOwnership()
+    {
+        // 2026-09-24 实机：探测（WebView 导航）在启动瞬间会假失败 —— `dsh web` 先打印 URL、
+        // 端口晚几秒才监听，此时探到 Unreachable。刷新**只修可达性**：一旦连归属一起清掉，
+        // 自家实例就会被误报成「复用外部实例」（用户截图里的症状）。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null)); // 之后服务挂了 / 假失败
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceOwned.Should().BeTrue();
+
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeFalse();
+        vm.ServiceOwned.Should().BeTrue("归属只由启动/停止流程决定，刷新不得清它");
+
+        // 端口恢复应答（服务一直在跑，只是刚才没探到）→ 仍是本软件的实例，不谎报外部复用。
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task RefreshServiceState_OtherOutcome_CountsAsRunning()
+    {
+        // 回归（2026-09-24 实机）：裸 DefaultUrl 常返回 401（要 token）——那是"服务活着"，
+        // 不是"没启动"。旧实现用 == Ok 判定，把自家刚拉起的服务判成没启动。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Other, 401, "unauthorized") };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+
+        await vm.RefreshServiceStateAsync(S2Config, CancellationToken.None);
+
+        vm.ServiceRunning.Should().BeTrue("端口有应答就说明服务在跑");
+        vm.ServiceOwned.Should().BeFalse("本软件从未启动过它，只能是外部实例");
+    }
+
+    [Fact]
+    public async Task StartService_PreProbeOther_SkipsLaunch()
+    {
+        // 预探测 401 同样说明实例已在：不能重复拉起（会撞端口），也不能把状态判成未启动。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Other, 401, "unauthorized") };
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        probe.CallCount.Should().Be(1, "已在运行时只探测一次，不进入启动管线");
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task StartService_PostProbeOther_KeepsOwned()
+    {
+        // 回归（2026-09-24）：自家启动后后探测打裸 URL 返回 401，旧实现 `ServiceOwned = ServiceRunning`
+        // 把归属清成 false → 状态行误报「复用外部实例」。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Other, 401, "unauthorized"));
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        vm.ServiceRunning.Should().BeTrue("401 = 有应答 = 服务在跑");
+        vm.ServiceOwned.Should().BeTrue("启动管线已判定归我们，后探测不得反向清归属");
+    }
+
+    [Fact]
+    public async Task StartService_PostProbeUnreachable_ButUrlCaptured_KeepsRunning()
+    {
+        // 回归（2026-09-24 实机）：`dsh web` 先打印 URL、端口晚 1.5~2 秒才开始 LISTEN，
+        // 后探测必然撞上这个窗口。抓到 URL 就说明我们拉起的进程确实起来了，
+        // 不能因为这次探测未应答就把状态写成「服务未启动」——用户刚点完「启动服务」
+        // 会看到红色的「服务未启动」，与事实相反。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null)); // 启动前：未启动
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null)); // 启动后：端口还没开始监听
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        vm.ServiceRunning.Should().BeTrue("抓到 URL = 进程已起来，只是端口还没开始监听");
+        vm.ServiceOwned.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task StartService_PreProbeOther_KeepsExistingOwnership()
+    {
+        // 自家实例已归我们（owned=true）时再点一次「启动服务」：预探测 401 走跳过分支，
+        // 该分支不得顺手把归属清成外部实例。
+        var probe = new FakeProbe();
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Unreachable, null, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Ok, 200, null));
+        probe.Enqueue(new ProbeResult(ProbeOutcome.Other, 401, "unauthorized"));
+        var launcher = new FakeLauncher { Result = new LaunchResult("http://x/", false, "") };
+        using var vm = new SessionViewModel(probe, launcher);
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+        vm.ServiceOwned.Should().BeTrue();
+
+        await vm.StartServiceAsync(S2Config, CancellationToken.None);
+
+        vm.ServiceRunning.Should().BeTrue();
+        vm.ServiceOwned.Should().BeTrue("跳过启动只修可达性，归属必须保留");
+    }
+
+    [Fact]
+    public void CompleteStartService_Failure_ClearsOwnership()
+    {
+        // 启动失败：即使之前 owned=true，也必须随 running=false 一起清零。
+        var probe = new FakeProbe { Result = new ProbeResult(ProbeOutcome.Ok, 200, null) };
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+        vm.RequestStopService(); // 持有守卫，模拟操作进行中
+
+        vm.CompleteStartService(false, "服务启动未完成：端口仍不可访问");
+        vm.ServiceRunning.Should().BeFalse();
+        vm.ServiceOwned.Should().BeFalse();
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task StartService_ExceptionInProbe_IsSwallowed_AndGuardReset()
+    {
+        var probe = new ThrowingProbe();
+        using var vm = new SessionViewModel(probe, new FakeLauncher());
+
+        var act = () => vm.StartServiceAsync(S2Config, CancellationToken.None);
+        await act.Should().NotThrowAsync();
+        vm.ServiceChanging.Should().BeFalse();
+    }
+
+    private sealed class ThrowingProbe : IEndpointProbe
+    {
+        public Task<ProbeResult> ProbeAsync(string url, CancellationToken ct) =>
+            throw new InvalidOperationException("probe boom");
     }
 }

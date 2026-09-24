@@ -6,9 +6,9 @@ namespace DshDesktop.App;
 /// </summary>
 internal static class AppVersion
 {
-    /// <summary>去掉末尾修订号：显示 1.0.1 而非 1.0.1.0。</summary>
+    /// <summary>去掉末尾修订号：显示 1.0.2 而非 1.0.2.0。</summary>
     internal static string Short =>
         System.Reflection.Assembly.GetExecutingAssembly().GetName().Version is { } v
             ? $"{v.Major}.{v.Minor}.{v.Build}"
-            : "1.0.1";
+            : "1.0.2";
 }

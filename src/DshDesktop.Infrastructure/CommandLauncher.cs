@@ -14,11 +14,52 @@ public sealed class CommandLauncher : IServerLauncher, IDisposable
     private Process? _process;
     private bool _disposed;
 
+    /// <summary>
+    /// 停止当前正在运行的服务进程。设置窗口的「关闭服务」按钮走这里 —— 关窗时的清场
+    /// 依赖 Job Object 的 <c>KILL_ON_JOB_CLOSE</c>，但用户在应用还开着的时候就想把服务停掉，
+    /// 不能等到关窗才生效。
+    /// <para>
+    /// 结束 <c>cmd.exe /c</c> 壳还不够：它常常已经把服务本体 detach 出去（服务自己 fork、
+    /// 壳直接退出），所以必须同时关掉 Job Object（它会连带结束整棵被它收养的子进程树）。
+    /// 已经退出/没有拉起过任何服务时是安全的空操作。
+    /// </para>
+    /// </summary>
+    public void Kill()
+    {
+        // 先杀 cmd 壳（若还活着），再关 Job Object 收割残余的整棵子进程树。
+        try
+        {
+            if (_process is { HasExited: false })
+                _process.Kill(entireProcessTree: true);
+        }
+        catch
+        {
+            // 进程可能在 Kill 前一刻自己退出，或没有权限 —— 都交给 Job Object 兜底。
+        }
+
+        try
+        {
+            _job?.Dispose();
+        }
+        catch
+        {
+            // 重复 Dispose / 句柄已关：忽略，服务可能本来就没被拉起过。
+        }
+
+        _job = null;
+        _process?.Dispose();
+        _process = null;
+    }
+
     public async Task<LaunchResult> LaunchAsync(
         AppConfig cfg,
         IProgress<string> output,
         CancellationToken ct)
     {
+        // 上一次「关闭服务」可能已经把 Job Object 关掉了；再启动必须给一个全新的，
+        // 否则 Assign 会把进程挂到一个已经关掉的句柄上（静默失败，关窗时就清不了场）。
+        _job ??= new JobObjectSupervisor();
+
         var psi = new ProcessStartInfo
         {
             FileName = "cmd.exe",
@@ -66,7 +107,6 @@ public sealed class CommandLauncher : IServerLauncher, IDisposable
         int streamsEnded = 0;
 
         _process = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        _job = new JobObjectSupervisor();
 
         void HandleLine(string? line)
         {
@@ -125,7 +165,7 @@ public sealed class CommandLauncher : IServerLauncher, IDisposable
             return new LaunchResult(null, false, captured.ToString());
         }
 
-        _job.Assign(_process);
+        _job?.Assign(_process);
         _process.BeginOutputReadLine();
         _process.BeginErrorReadLine();
 
