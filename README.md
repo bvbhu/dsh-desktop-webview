@@ -60,7 +60,7 @@
 
 ### 更新
 
-> **建议备份** 。操作正确不会影响数据，但误操作可能导致配置丢失。更新前把整个文件夹复制一份，至少复制 `config.json` 和 `WebView2Profile` 。
+> **建议备份** 。操作正确不会影响数据，但误操作可能导致配置丢失。至少备份 `config.json` 和 `WebView2Profile` 。
 
 压缩包内没有 `config.json`（设置文件）和 `WebView2Profile`（Cookie / 登录态 / 缓存）等，直接解压覆盖不会影响设置和浏览器数据。
 
@@ -76,22 +76,17 @@ dotnet test  DSH-Desktop-Webview.sln -c Debug    # 全量单元测试
 构建便携版（产物在 `artifacts/portable/`）：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\publish.ps1                 # 默认版（依赖net）
-powershell -ExecutionPolicy Bypass -File .\publish.ps1 -SelfContained  # 自带net运行时
+.\build.ps1                 # 默认版（依赖框架，约 27 MB）
+.\build.ps1 -SelfContained  # 自带 .NET 8 运行时（约 180 MB）
 ```
 
-`publish.ps1` 会**清空** `artifacts/portable`。
+`build.ps1` 是**全项目唯一的构建脚本**，且**永远保留运行期数据**：会把 `config.json` / `run.log` / `WebView2Profile` / `temp` 先搬到 `artifacts/.publish-keep` 暂存，构建成功后原样搬回（失败路径也尽力搬回）。没有"清空数据"的变体 —— 要干净重来就手动删 `artifacts/portable`。
 
-希望保留运行时数据改用 `publish-keep-data.ps1`。只构建默认版，与 `publish.ps1` 的区别是会将`config.json` / `run.log` / `WebView2Profile` / `temp`备份到`artifacts/.publish-keep` 暂存，构建完成后恢复。
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\publish-keep-data.ps1
-```
 其他参数和注意事项：
 
-- `-NoPause`：运行结束不 pause，便于自动化调用
+- `-Pause`：结束前pause
 - 应用运行中会锁住 exe 导致发布失败，发布前先退出程序
-- `publish-keep-data.ps1` 检测到程序正在运行会直接退出（必须如此：否则搬数据中途失败会把数据撕在两处）；若上次残留的暂存目录非空，它会停止并提示手动处理，绝不静默覆盖
+- `build.ps1` 检测到**本目录**有程序在运行会直接退出；若上次残留的暂存目录非空，会停止并提示手动处理。
 - `tools/` 下两个离屏渲染预览工程（picker-preview / settings-preview）是 UI 开发辅助，不在解决方案内
 - DSH 工作区不要包含程序目录，详见下方专节
 
