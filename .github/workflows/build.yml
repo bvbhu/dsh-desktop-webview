@@ -3,9 +3,16 @@ name: build-portable
 # 便携版自动构建。
 #
 # 触发：push 到 main，或手动 dispatch。
-# 产物：Artifacts 里的两个包（依赖框架版 + 自包含版）。不创建 Release（尚未签名）。
+# 产物：Artifacts 里的两个包（依赖框架版 + 自包含版）。
 #       包由 upload-artifact 自己压缩，解压一次即得一个顶层文件夹，内部不再套 zip。
 # 保留：只保留最新一次构建，旧的 artifact 在构建成功后被删除。
+#
+# Release 通道：构建成功后由 release job 把同内容的两个 zip 上传到固定 Release
+#   （tag = env.RELEASE_TAG，永远只有这一个），用户从 Release 页下载 —— Actions
+#   Artifact 的下载速度太慢。该 Release 始终标记为 pre-release，不参与 Latest 徽标，
+#   不会与正式版 Release 混淆；release job 全程只操作这一个 tag，其它 Release 一概不碰。
+#   资产用固定名，每次构建由 gh release upload --clobber 同名替换，Release 页永远只有一份最新构建；
+#   tag 也随每次构建强制移到最新 commit，源码快照与资产始终同源。
 
 on:
   push:
@@ -17,12 +24,15 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # build 只读；release 要写 Release（contents: write）；cleanup 要删 artifact（actions: write）。
+  contents: write
   actions: write
 
 env:
   CONFIGURATION: Release
   RUNTIME: win-x64
+  # 唯一允许被 CI 更新的 Release tag。绝不改成 v* 之类的正式版本 tag。
+  RELEASE_TAG: ci-latest
 
 jobs:
   build:
@@ -147,6 +157,153 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  release:
+    # 只有构建（含测试与产物校验）全部成功才发布；失败时保留 artifact 供排查，Release 不动。
+    needs: build
+    if: success()
+    runs-on: windows-latest
+
+    steps:
+      # 按名字取回两个 artifact：内容与现在用户从 Actions 下载的完全一致
+      # （顶层是与交付同名的一层文件夹，不套多余 zip 壳）。
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          # 只取 build job 上传的两个 artifact（按前缀匹配），其它分支/工作流的产物不碰。
+          pattern: DSH-Desktop-Webview*
+          path: release-assets
+          # 每个 artifact 解到自己的子目录（<dist>-<短sha>），与下面 Package zips 的取用名一致。
+          merge-multiple: false
+
+      - name: Package zips
+        shell: pwsh
+        run: |
+          # artifact 目录名 = upload-artifact 的 name = 'dist-短sha'。GITHUB_ENV 不跨 job，
+          # 所以这里用同一个 github.sha 重算短 sha（与 cleanup job 的做法一致）。
+          $short = "${{ github.sha }}".Substring(0, 7)
+          # zip 用固定名：每次构建同名替换，Release 页永远只有一份最新构建，下载链接稳定。
+          $map = @{
+            "DSH-Desktop-Webview.zip"          = "DSH-Desktop-Webview-$short"
+            "DSH-Desktop-Webview-with-net.zip" = "DSH-Desktop-Webview-with-net-$short"
+          }
+
+          New-Item -ItemType Directory -Path "zips" -Force | Out-Null
+
+          foreach ($zip in $map.Keys) {
+            $dir = Join-Path "release-assets" $map[$zip]
+            if (-not (Test-Path $dir)) { throw "缺少 artifact 目录: $dir" }
+
+            # 自检：待打包目录里不能有 zip，否则用户会拿到「压缩包里套压缩包」。
+            $nested = @(Get-ChildItem -Path $dir -Recurse -File -Filter "*.zip" -Force)
+            if ($nested.Count -gt 0) {
+              throw "待打包目录里混入了 zip: $($nested.Name -join ', ')"
+            }
+
+            # zip 内部结构必须与 Actions artifact 一致：顶层只有一层 'DSH Desktop Webview'
+            # 文件夹。注意 download-artifact 解出的是 release-assets/<artifact名>/，它内部
+            # 才是 'DSH Desktop Webview'，所以这里拷的是 $dir 的子项（不能把 $dir 整个拷成
+            # 顶层文件夹，否则用户要解两层同名文件夹才能看到 exe）。
+            # 显式列出子项（含隐藏）再逐个拷，避免 * 通配符悄悄丢掉隐藏文件。
+            if (Test-Path "zipstage") { Remove-Item "zipstage" -Recurse -Force }
+            $stageDir = "zipstage/DSH Desktop Webview"
+            New-Item -ItemType Directory -Path $stageDir -Force | Out-Null
+            Get-ChildItem -Path $dir -Force | ForEach-Object {
+              Copy-Item -Path $_.FullName -Destination $stageDir -Recurse -Force
+            }
+
+            $dest = "zips/$zip"
+            if (Test-Path $dest) { Remove-Item $dest -Force }
+            # 不用 Compress-Archive：它的通配符枚举会漏掉隐藏文件（PowerShell Archive 的
+            # 老牌问题）。ZipFile::CreateFromDirectory 按 .NET 目录枚举打包，一个文件都
+            # 不少，与 upload-artifact include-hidden-files 的口径一致。
+            Add-Type -AssemblyName System.IO.Compression.FileSystem
+            [System.IO.Compression.ZipFile]::CreateFromDirectory("zipstage", $dest)
+            Remove-Item "zipstage" -Recurse -Force
+
+            $size = (Get-Item $dest).Length
+            if ($size -le 0) { throw "$zip 为空文件" }
+            Write-Host ("OK: {0} = {1:N1} MB" -f $zip, ($size / 1MB))
+          }
+
+      # 全流程只认 env.RELEASE_TAG 这一个 tag：不存在则创建（预发布）；存在则把 tag 强制
+      # 移到本次 commit，并同名替换资产。其它 Release（正式版等）全程不被读取、不被修改。
+      - name: Update fixed pre-release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $repo = "${{ github.repository }}"
+          $tag  = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) { throw "RELEASE_TAG 为空，拒绝发布" }
+          # $assets 是本地文件路径，$names 是上传后在 Release 页显示的资产名，一一对应。
+          $assets = @(
+            "zips/DSH-Desktop-Webview.zip",
+            "zips/DSH-Desktop-Webview-with-net.zip"
+          )
+          $names = @("DSH-Desktop-Webview.zip", "DSH-Desktop-Webview-with-net.zip")
+
+          $short  = "${{ github.sha }}".Substring(0, 7)
+          $when   = [DateTime]::UtcNow.ToString("yyyy-MM-dd HH:mm 'UTC'")
+          $notes  = "CI 滚动构建（预发布，非正式版本）。`n`n提交: ${{ github.sha }}（$short）`n构建时间: $when`n`n资产为固定名，每次构建覆盖。"
+
+          # release 是否已存在
+          $exists = $false
+          gh release view $tag --repo $repo 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $exists = $true }
+
+          if (-not $exists) {
+            # 防呆：tag 必须是「尚不存在」或「本仓库自己的轻量 tag」。
+            # 绝不允许 CI 首次创建时就套在正式版本 tag 上，否则会把正式版标成预发布。
+            gh api "repos/$repo/git/ref/tags/$tag" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              throw "tag '$tag' 已指向既有对象，拒绝创建 Release —— 请确认 RELEASE_TAG 没被改成正式版本 tag"
+            }
+
+            Write-Host "创建固定预发布 Release: $tag"
+            # --target 让 tag 落在本次构建的 commit 上（dispatch 到非默认分支时也不会指错）。
+            gh release create $tag `
+              --repo $repo `
+              --target "${{ github.sha }}" `
+              --prerelease `
+              --title "CI Latest (预发布)" `
+              --notes $notes | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release create 失败: $LASTEXITCODE" }
+          } else {
+            # 已存在：刷新标题/描述（含预发布标记），并把 tag 强制移到本次 commit ——
+            # 这是滚动发布的语义：资产同名替换（见下方 --clobber），源码快照也跟着走。
+            # PATCH git/ref 只作用于 ci-latest 这一个 ref，其它 tag / Release 一概不碰。
+            gh release edit $tag --repo $repo --prerelease --title "CI Latest (预发布)" --notes $notes | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit 失败: $LASTEXITCODE" }
+
+            # 移动 tag 必须带 force=true（tag 不允许非快进移动）；-F 让 gh 把它发成布尔值。
+            # 若 tag 已在本次 commit（同一 run 重跑），这是无操作，照样成功。
+            gh api -X PATCH "repos/$repo/git/refs/tags/$tag" `
+              -f sha="${{ github.sha }}" -F force=true | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "移动 tag '$tag' 到本次 commit 失败: $LASTEXITCODE" }
+
+            Write-Host "已存在 Release '$tag'，tag 已移到本次 commit，准备用 --clobber 覆盖同名资产。"
+          }
+
+          # —— 直接用 upload --clobber 上传，不再先 delete-asset ——
+          # --clobber 在资产已存在时自动替换、不存在时直接新建，两种情况一条命令搞定。
+          # 原来「先 delete 后 upload」反而有竞态：删除后上传若失败，Release 会缺资产。
+          foreach ($a in $assets) {
+            if (-not (Test-Path $a)) { throw "缺少待上传文件: $a" }
+            gh release upload $tag $a --repo $repo --clobber | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload $a 失败: $LASTEXITCODE" }
+            Write-Host "已上传: $a"
+          }
+
+          # 终检：Release 必须仍是预发布（不抢 Latest 徽标），且两个资产都在。
+          $info = gh release view $tag --repo $repo --json isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "gh release view 失败: $LASTEXITCODE" }
+          if (-not $info.isPrerelease) { throw "Release '$tag' 不是预发布状态 —— 拒绝继续" }
+          $got = @($info.assets | ForEach-Object { $_.name })
+          foreach ($n in $names) {
+            if ($n -notin $got) { throw "Release 缺少资产: $n" }
+          }
+          Write-Host ("OK: {0} 为预发布，资产齐全: {1}" -f $tag, ($got -join ', '))
+
   cleanup:
     needs: build
     if: success()
@@ -166,7 +323,7 @@ jobs:
 
           # 本次构建的两个包都算「当前」，都要留。名字必须与 build job 的 upload-artifact
           # 完全一致，否则会把刚上传的产物当「旧的」删掉；cleanup 与 build 无法共享 matrix，
-          # 所以这里只能重写一遍 —— 改动命名时两处都要改。
+          # 所以这里只能重写一遍 —— release job 的打包步骤也依赖这套命名，改动时几处都要改。
           if ([string]::IsNullOrWhiteSpace($env:SHA_SHORT)) {
             throw "SHA_SHORT 为空，拒绝清理 —— 否则会把刚上传的产物全部误删"
           }
