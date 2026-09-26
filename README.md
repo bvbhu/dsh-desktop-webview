@@ -48,16 +48,18 @@
 
 ### 下载
 
-见 Releases 页面。
+正式版本见 Releases 页面。
 
-可以在 Actions 页面直接下载 CI 构建产物。
+每次 CI 构建成功后，还会自动更新一个**滚动预发布**版本（固定 tag `ci-latest`），内容为 `main` 分支最新一次成功构建，**不是正式版**。
 
 | 压缩包 | 大小 | 需要 .NET 运行时？ | 说明 |
 | --- | --- | --- | --- |
-| `DSH-Desktop-Webview-<sha>.zip` | 约 7 MB | 需要 | 默认版。必须安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
-| `DSH-Desktop-Webview-with-net-<sha>.zip` | 约 75 MB | 不需要 | 自包含版，运行时已打进包内，下载即用 |
+| `DSH-Desktop-Webview.zip` | 约 7 MB | 需要 | 默认版。必须安装 [.NET 8 桌面运行时](https://dotnet.microsoft.com/download/dotnet/8.0) |
+| `DSH-Desktop-Webview-with-net.zip` | 约 75 MB | 不需要 | 自包含版，运行时已打进包内，下载即用 |
 
 两个包解压后都是一个名为 `DSH Desktop Webview` 的文件夹，双击其中的 `DSH-Desktop-Webview.exe` 即可运行。
+
+> Actions 页面里的同名构建产物仍然保留，内容与上面的 zip 一致，但从 Actions 下载通常更慢。
 
 ### 更新
 

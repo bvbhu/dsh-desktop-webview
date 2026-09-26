@@ -325,7 +325,7 @@
                         <StackPanel Visibility="{Binding OpenExternalLinksEnabled, Converter={StaticResource BoolVis}}">
 
                             <local:SelectableHint Label="URL 正则"
-                                                  Text="匹配该正则的链接才交给外部浏览器。默认只匹配域名（非 IP 字面量、非 localhost），例如 github.com 会交给浏览器，而 127.0.0.1 留在软件内。&#x0a;留空等同于关闭本功能）。"
+                                                  Text="匹配该正则的链接才交给外部浏览器。默认只匹配域名（非 IP 字面量、非 localhost），例如 github.com 会交给浏览器，而 127.0.0.1 留在软件内，留空等同于关闭本功能。"
                                                   Margin="0,0,0,6" />
                             <TextBox Style="{StaticResource MonoTextBoxStyle}" Margin="0,0,0,14"
                                      Text="{Binding ExternalLinkUrlRegex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
