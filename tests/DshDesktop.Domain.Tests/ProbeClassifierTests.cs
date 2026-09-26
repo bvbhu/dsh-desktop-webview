@@ -47,6 +47,34 @@ public class ProbeClassifierTests
             .Should().Be(ServiceAction.Launch);
     }
 
+    [Theory]
+    // 网络层存活检查（HttpEndpointProbe）：拿到的是服务器真实应答，没有"错误页冒充 200"的问题
+    [InlineData(200, ProbeOutcome.Ok)]
+    [InlineData(204, ProbeOutcome.Ok)]
+    [InlineData(299, ProbeOutcome.Ok)]
+    // 401 = 服务活着、只是要 token（§4.7）——绝不能判成"没启动"
+    [InlineData(401, ProbeOutcome.Other)]
+    [InlineData(403, ProbeOutcome.Other)]
+    [InlineData(404, ProbeOutcome.Other)]
+    [InlineData(500, ProbeOutcome.Other)]
+    // null = 连接失败/超时
+    [InlineData(null, ProbeOutcome.Unreachable)]
+    public void ClassifyHttpStatus_MapsStatusPerSpec(int? status, ProbeOutcome expected)
+    {
+        ProbeClassifier.ClassifyHttpStatus(status).Should().Be(expected);
+    }
+
+    [Fact]
+    public void ClassifyHttpStatus_401_CountsAsRunning_NotAsDown()
+    {
+        // 2026-09-24 回归的核心：401 曾被当成"服务未启动"，连锁清掉归属 →
+        // 状态行误报「复用外部实例」。存活检查必须把 401 当"活着"。
+        var outcome = ProbeClassifier.ClassifyHttpStatus(401);
+
+        outcome.Should().NotBe(ProbeOutcome.Unreachable);
+        (outcome != ProbeOutcome.Unreachable).Should().BeTrue("401 说明端口有实例在听");
+    }
+
     [Fact]
     public void ErrorPagePolluted200_StillLeadsToLaunch()
     {

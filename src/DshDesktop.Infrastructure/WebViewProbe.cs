@@ -54,7 +54,15 @@ public sealed class WebViewProbe : IEndpointProbe
 
         try
         {
+            // ⚠️ 这是一次**真实的、可见的**导航：它会替换主 WebView 当前显示的文档。
+            // 因此本类只用于「页面还没显示出来之前」的那一次启动探测（S2 分流，§4.2）。
+            // **服务存活/状态检查一律不要走这里** —— 用 HttpEndpointProbe：
+            // 那些检查发生在页面已经加载之后，用本类会把用户正在看的页面刷掉，
+            // 叠加起来就是 2026-09-24 用户报告的"反复刷新页面"。
+            // （曾尝试改用 CoreWebView2.NavigationAsync 让它不落历史，但该 API 不存在，
+            //   编译期即 CS1061 —— 不要再试这条路。）
             _coreWebView2.Navigate(url);
+
             // 内部超时兜底：NavigationCompleted 极端情况下可能永不触发。
             // 超时按「连接失败」分流进入启动管线（§4.2：连接失败/超时 → Launching），
             // 与外部取消区分开。

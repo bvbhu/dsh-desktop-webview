@@ -21,7 +21,17 @@ public partial class MainWindow : System.Windows.Window
     private readonly SettingsViewModel _settings;
     private readonly ConfigStore _configStore;
     private readonly WebViewProbe _probe;
+    /// <summary>
+    /// 存活检查探针（网络实现）。与 <see cref="_probe"/> 分开的理由见
+    /// <see cref="HttpEndpointProbe"/>：存活检查绝不能导航主 WebView。
+    /// </summary>
+    private readonly IEndpointProbe _livenessProbe;
     private readonly CommandLauncher? _launcherRef;
+
+    /// <summary>
+    /// 外部链接判定策略的缓存。配置在设置窗口保存后就地换掉，所以保存路径里要置空重建
+    /// （见 <see cref="OnConfigSaved"/>）—— 否则"改了正则要重启才生效"。
+    /// </summary>
     private readonly string _webViewProfilePath;
     private readonly RunLog? _runLog;
     private SettingsWindow? _settingsWindow;
@@ -81,12 +91,26 @@ public partial class MainWindow : System.Windows.Window
     private long _realNavId = -1;
 
     /// <summary>
-    /// 真实导航失败后的重试预算与目标：冷启动时 <c>dsh web</c> 打印 URL 早于端口开始 LISTEN，
-    /// 首次导航必然失败（见 <see cref="OnNavigateRequested"/>）。只重试一次，避免坏 URL 死循环。
+    /// 正在等待开始的那次真实导航的目标 URL。用于在 <see cref="OnCoreNavigationStarting"/>
+    /// 里把真实导航与探测（同一 WebView 上的 NavigationAsync）区分开 —— 只靠"有 pending"
+    /// 会被探测偷走 Id。
     /// </summary>
-    private const int NavigationRetryDelayMs = 1500;
+    private string? _pendingRealNavUrl;
+
+    /// <summary>
+    /// 真实导航的重试预算与目标。<c>dsh web</c> 打印 URL 早于端口开始 LISTEN，
+    /// 首次导航可能撞上这个空窗。**重试不再自己发导航**，而是交给
+    /// <see cref="_readiness"/> 等待端口就绪后再导航一次（见 <see cref="ScheduleRealNavRetry"/>）。
+    /// </summary>
     private string? _lastRealNavUrl;
     private int _realNavRetriesLeft;
+
+    /// <summary>
+    /// 服务就绪等待器（单次 in-flight）。所有"端口还没起来"的场景共用它：
+    /// 导航失败后重试、启动/重启后的确认探测。共用是重点 —— 各自盲重试会叠加成
+    /// "页面反复刷新"（见 <see cref="ServiceReadinessWaiter"/> 的注释）。
+    /// </summary>
+    private readonly ServiceReadinessWaiter _readiness;
 
     public MainWindow(
         AppConfig config,
@@ -97,7 +121,8 @@ public partial class MainWindow : System.Windows.Window
         WebViewProbe probe,
         string webViewProfilePath,
         RunLog? runLog = null,
-        CommandLauncher? launcher = null)
+        CommandLauncher? launcher = null,
+        IEndpointProbe? livenessProbe = null)
     {
         InitializeComponent();
         _config = config;
@@ -106,9 +131,19 @@ public partial class MainWindow : System.Windows.Window
         _settings = settings;
         _configStore = configStore;
         _probe = probe;
+        _livenessProbe = livenessProbe ?? probe;
         _webViewProfilePath = webViewProfilePath;
         _runLog = runLog;
         _launcherRef = launcher;
+
+        // 就绪等待器全程只有一个实例：同一时刻只允许一轮轮询在跑（单次 in-flight），
+        // 避免"导航重试"与"启动后确认探测"两条链各自打满 WebView。
+        _readiness = new ServiceReadinessWaiter(_livenessProbe)
+        {
+            OnAttempt = (attempt, result) =>
+                _runLog?.Append($"[probe] 等待服务就绪 第 {attempt} 次仍未应答"
+                    + $"（outcome={result.Outcome} detail={LogRedaction.Line(result.Detail)}）"),
+        };
 
         // 窗口最小 500×500：拦住拖拽缩小的下限（异常值判定见 MinWindowWidth 注释）。
         MinWidth = MinWindowWidth;
@@ -393,8 +428,11 @@ public partial class MainWindow : System.Windows.Window
                 }
 
                 // 新 core 是全新对象：之前挂在旧 core 上的事件与菜单项都不再有效，必须重接。
+                // 这里必须与 InitializeAsync 接的是同一套事件 —— 旧实现只重挂了 ProcessFailed，
+                // 于是重建之后 NavigationStarting/NavigationCompleted 全丢：
+                // 表现为「临时 URL 导航成功却不再自动关设置窗口」+「加载浮层永不收起」。
                 _settingsMenuItem = null;
-                core.ProcessFailed += OnCoreProcessFailed;
+                AttachCoreEvents(core);
                 _probe.SetWebView(core);
                 SetupContextMenu(core);
 
@@ -1042,18 +1080,32 @@ public partial class MainWindow : System.Windows.Window
             return;
         }
 
+        AttachCoreEvents(core);
+        _probe.SetWebView(core);
+        SetupContextMenu(core);
+        // "ready" 是纯 ASCII 锚点，便于脚本判读日志关键词；中文负载仅供人读。
+        _runLog?.Append("[shell] ready 窗口就绪，开始会话");
+        _ = _session.StartSessionAsync(_config, CancellationToken.None);
+    }
+
+    /// <summary>
+    /// 把本类需要的 CoreWebView2 事件挂上去。
+    /// <para>
+    /// <b>必须是唯一挂接点</b>：浏览器进程崩溃后重建会换出一个全新的 CoreWebView2 对象，
+    /// 旧对象上的事件全部失效。初始化路径与重建路径共用本方法，才能保证两条路的
+    /// 行为一致 —— 旧实现重建时只重挂了 ProcessFailed，于是重建后
+    /// NavigationStarting/NavigationCompleted 全丢：表现为「临时 URL 导航成功却不再
+    /// 自动关设置窗口」+「加载浮层永不收起」。
+    /// </para>
+    /// </summary>
+    private void AttachCoreEvents(CoreWebView2 core)
+    {
         core.ProcessFailed += OnCoreProcessFailed;
         core.NavigationCompleted += OnCoreNavigationCompleted;
         // 探测自身也会导航主 WebView，所以"真实导航"要用 NavigationStarting 把 Id 配对出来，
         // 它的 NavigationCompleted 才算"页面加载完成"（浮层消失的时刻）。
         core.NavigationStarting += OnCoreNavigationStarting;
-
-        _probe.SetWebView(core);
-        SetupContextMenu(core);
-
-        // "ready" 是纯 ASCII 锚点，便于脚本判读日志关键词；中文负载仅供人读。
-        _runLog?.Append("[shell] ready 窗口就绪，开始会话");
-        _ = _session.StartSessionAsync(_config, CancellationToken.None);
+        // 页面里的 window.open / target="_blank" 走这里：默认会弹 WebView2 自带窗口，
     }
 
     private void SetupContextMenu(CoreWebView2 core)
@@ -1148,6 +1200,7 @@ public partial class MainWindow : System.Windows.Window
         // 只有会话显式发起的这次导航是"真实导航"；它的 NavigationCompleted
         // 才是加载浮层消失的时刻（探测的导航不算，见 OnCoreNavigationStarting）
         _pendingRealNav = true;
+        _pendingRealNavUrl = url;
         ShowLoadingOverlay(overlayMessage);
         _runLog?.Append($"[nav] 导航到 {LogRedaction.Url(url)}");
         Dispatcher.Invoke(() =>
@@ -1223,9 +1276,34 @@ public partial class MainWindow : System.Windows.Window
         if (!_pendingRealNav)
             return;
 
+        // S2 启动探测（WebViewProbe）走的也是**这个** WebView，同样会触发 NavigationStarting
+        // ——它是一次真实的、可见的导航（见 WebViewProbe 的注释）。
+        // 若这里只判"有 pending 就配对"，一次恰好在中间发生的探测会偷走这次真实导航的 Id：
+        // 真实导航的 NavigationCompleted 于是永远匹配不上 → 加载浮层永不收起、失败重试也失效。
+        // 因此必须连目标 URL 一起比对。
+        if (!SameNavigationTarget(e.Uri, _pendingRealNavUrl))
+            return;
+
         _pendingRealNav = false;
         // NavigationId 是 ulong；数值远小于 long 上限，收窄存 long 与哨兵 -1 配套
         _realNavId = unchecked((long)e.NavigationId);
+    }
+
+    /// <summary>
+    /// 两次导航是否指向同一目标（用于把真实导航与探测区分开）。
+    /// 忽略 query/fragment 之外的差异时用左半部分比较；解析失败则退化为原样比对。
+    /// </summary>
+    private static bool SameNavigationTarget(string? candidate, string? expected)
+    {
+        if (string.IsNullOrEmpty(candidate) || string.IsNullOrEmpty(expected))
+            return false;
+        if (string.Equals(candidate, expected, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return Uri.TryCreate(candidate, UriKind.Absolute, out var a)
+            && Uri.TryCreate(expected, UriKind.Absolute, out var b)
+            && string.Equals(a.GetLeftPart(UriPartial.Path), b.GetLeftPart(UriPartial.Path),
+                StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -1239,9 +1317,15 @@ public partial class MainWindow : System.Windows.Window
     /// </summary>
     private void OnCoreNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
+        // 这次完成事件是不是我们发起的"真实导航"？先算出来再动 _realNavId —— 下面的
+        // 临时 URL 分支必须只认真实导航：S2 启动探测（WebViewProbe）同样会导航本 WebView
+        // 并触发本事件，若不加这个门，一次恰好成功的探测会误判成
+        // "临时 URL 页面已打开"并关掉设置窗口。
+        var isRealNav = unchecked((long)e.NavigationId) == _realNavId;
+
         // 真实导航完成 = 页面加载完成（无论成败）：加载浮层让位。
         // 失败时不重开浮层 —— 错误信息会出现在控制台/设置窗口，盖着反而挡视线。
-        if (unchecked((long)e.NavigationId) == _realNavId)
+        if (isRealNav)
         {
             _realNavId = -1;
             _runLog?.Append($"[nav] 页面加载完成（IsSuccess={e.IsSuccess}），收起加载浮层");
@@ -1250,7 +1334,7 @@ public partial class MainWindow : System.Windows.Window
                 ScheduleRealNavRetry(_lastRealNavUrl);
         }
 
-        if (!_awaitTempUrlNavigation)
+        if (!_awaitTempUrlNavigation || !isRealNav)
             return;
 
         if (!e.IsSuccess)
@@ -1266,20 +1350,48 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 真实导航失败后延迟重试一次（冷启动时端口尚未 LISTEN，见 <see cref="OnNavigateRequested"/>）。
-    /// 期间用户可能已提交临时 URL 或点了别的导航 —— 目标变了就放弃，别抢用户的导航。
+    /// 真实导航失败后的补救：**先等端口就绪，就绪后再导航一次**。
+    /// <para>
+    /// 旧实现是「1.5s 后直接重新 Navigate」。问题在于它是一条与别处互不知情的盲重试链：
+    /// 探测本身也在导航同一个 WebView，启动/重启后还有最多 5 次确认探测，
+    /// 几条链叠在一起就是用户看到的"页面反复刷新"。
+    /// </para>
+    /// <para>
+    /// 现在只做一件事：把"端口还没 LISTEN"当成一个等待条件交给
+    /// <see cref="ServiceReadinessWaiter"/>（单次 in-flight，多方可共享同一轮等待），
+    /// 拿到就绪结果后**只导航这一次**。期间用户可能已提交临时 URL 或点了别的导航 ——
+    /// 目标变了就放弃，别抢用户的导航。
+    /// </para>
     /// </summary>
     private async void ScheduleRealNavRetry(string url)
     {
         _realNavRetriesLeft--;
-        _runLog?.Append($"[nav] 首次导航未成功（端口可能尚未开始监听），{NavigationRetryDelayMs}ms 后重试一次");
-        await Task.Delay(NavigationRetryDelayMs);
 
+        ProbeResult probe;
+        try
+        {
+            probe = await _readiness.WaitAsync(url, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _runLog?.Append($"[nav] 等待服务就绪失败：{ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        // 等待期间目标可能已变（用户改了 URL / 已发起新导航），此时绝不抢导航。
         if (_lastRealNavUrl != url || _pendingRealNav)
             return;
 
-        _runLog?.Append("[nav] 重试导航");
-        NavigateCore(url, "正在重新连接服务…");
+        if (probe.Outcome == ProbeOutcome.Unreachable)
+        {
+            // 预算耗尽仍不可达：真的没起来。不再盲目重导航 —— 那只会把错误页反复重刷。
+            _runLog?.Append("[nav] 等待服务就绪超时，端口仍不可达，放弃本次重试导航");
+            _session.Note("服务未在预期时间内就绪，页面可能无法打开");
+            return;
+        }
+
+        _runLog?.Append($"[nav] 服务已就绪（outcome={probe.Outcome}），重试导航一次");
+        NavigateCore(url, "正在打开页面…");
     }
 
     private void OpenSettings()
@@ -1418,7 +1530,7 @@ public partial class MainWindow : System.Windows.Window
 
         try
         {
-            var probe = await _probe.ProbeAsync(_config.DefaultUrl, CancellationToken.None);
+            var probe = await _livenessProbe.ProbeAsync(_config.DefaultUrl, CancellationToken.None);
             // 有应答（含 401）就算仍可达：401 只是要 token，说明进程还活着。
             var stillReachable = probe.Outcome != ProbeOutcome.Unreachable;
             if (stillReachable)
@@ -1455,27 +1567,23 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>
-    /// 启动/重启后的确认探测，必须重试：<c>dsh web</c> 先打印 URL、端口晚约 1.5~2 秒才开始
+    /// 启动/重启后的确认探测。必须等待：<c>dsh web</c> 先打印 URL、端口晚 1.5~2 秒才开始
     /// LISTEN（2026-09-24 实机：URL 行 19:55:32.602，页面重试导航 19:55:34.513 才成功），
     /// 单次探测必然落在这个窗口里探到 <see cref="ProbeOutcome.Unreachable"/>，把一次成功的启动
-    /// 误报成「服务未启动」。这里重试到有应答为止，预算约 6 秒（5 次，间隔 1.5s）；
-    /// 预算用尽仍不可达 = 真的没起来，交给调用方按失败处理。
+    /// 误报成「服务未启动」。
+    /// <para>
+    /// 走与导航重试**同一个** <see cref="ServiceReadinessWaiter"/>：这是关键改动。
+    /// 旧实现这里是一套独立的 5×1.5s 盲重试，而每次探测都是一次真实的 WebView 导航 ——
+    /// 与导航重试链叠加就会反复重刷页面。现在两条链共享同一轮等待，
+    /// 同一次启动最多只产生一轮轮询。
+    /// </para>
+    /// <para>
+    /// 用 <see cref="ServiceReadinessWaiter.RestartAsync"/> 而非 <c>WaitAsync</c>：
+    /// 用户刚点了「启动服务」，这是一次明确的重新检查，不该复用上一轮可能已失败的结果。
+    /// </para>
     /// </summary>
-    private async Task<ProbeResult> ProbeAfterStartAsync(string url)
-    {
-        const int maxAttempts = 5;
-        const int retryDelayMs = 1500;
-
-        var result = await _probe.ProbeAsync(url, CancellationToken.None);
-        for (var attempt = 1; attempt < maxAttempts && result.Outcome == ProbeOutcome.Unreachable; attempt++)
-        {
-            _runLog?.Append($"[probe] 启动后探测未应答（第 {attempt} 次重试），{retryDelayMs}ms 后再试");
-            await Task.Delay(retryDelayMs);
-            result = await _probe.ProbeAsync(url, CancellationToken.None);
-        }
-
-        return result;
-    }
+    private Task<ProbeResult> ProbeAfterStartAsync(string url) =>
+        _readiness.RestartAsync(url, CancellationToken.None);
 
     /// <summary>
     /// 启动服务（设置窗口「启动服务」）。用当前生效配置（可能已被设置窗口就地改过，但「保存」前

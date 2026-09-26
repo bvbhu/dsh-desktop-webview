@@ -9,6 +9,7 @@ namespace DshDesktop.App;
 public partial class App : System.Windows.Application
 {
     private RunLog? _runLog;
+    private HttpEndpointProbe? _livenessProbe;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -97,9 +98,13 @@ public partial class App : System.Windows.Application
         }
 
         var probe = new WebViewProbe();
+        // 存活检查走网络，不走 WebView：WebView 探针是一次真实导航，会把用户正在看的
+        // 页面刷掉。两者分工见 HttpEndpointProbe 的注释。
+        var livenessProbe = new HttpEndpointProbe();
+        _livenessProbe = livenessProbe;
         var launcher = new CommandLauncher();
         var shell = new ShellViewModel();
-        var session = new SessionViewModel(probe, launcher);
+        var session = new SessionViewModel(probe, launcher, livenessProbe);
         var settings = new SettingsViewModel(config);
 
         session.LogLine += line => _runLog?.Append(line);
@@ -110,7 +115,7 @@ public partial class App : System.Windows.Application
         // 服务进程（Job Object 在那条路径上不能等到关窗才生效）。
         var mainWindow = new MainWindow(
             config, shell, session, settings, configStore, probe,
-            DataPaths.ProfileDir, _runLog, launcher);
+            DataPaths.ProfileDir, _runLog, launcher, livenessProbe);
         MainWindow = mainWindow;
         mainWindow.Closed += (_, _) => Shutdown();
         mainWindow.Show();
@@ -119,6 +124,8 @@ public partial class App : System.Windows.Application
     protected override void OnExit(ExitEventArgs e)
     {
         _runLog?.Append($"==== 退出 exitCode={e.ApplicationExitCode} ====");
+        // 进程级对象，退出时释放一次；不释放也能被系统回收，但实现了 IDisposable 就该收尾。
+        _livenessProbe?.Dispose();
         base.OnExit(e);
     }
 }

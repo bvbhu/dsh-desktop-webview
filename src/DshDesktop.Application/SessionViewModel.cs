@@ -7,6 +7,7 @@ public sealed class SessionViewModel : ViewModelBase, IDisposable
 {
     private readonly SessionStateMachine _state = new();
     private readonly IEndpointProbe _probe;
+    private readonly IEndpointProbe _livenessProbe;
     private readonly IServerLauncher _launcher;
     private readonly StringBuilder _console = new();
     private readonly object _consoleLock = new();
@@ -95,9 +96,23 @@ public sealed class SessionViewModel : ViewModelBase, IDisposable
     /// </summary>
     public event Action<string>? LogLine;
 
-    public SessionViewModel(IEndpointProbe probe, IServerLauncher launcher)
+    /// <param name="probe">
+    /// 启动探测用的探针（WebView 实现）：只用于「页面显示之前」的 S2 分流与回退探测 ——
+    /// 它必须与真实导航共用 cookie / 会话（§6）。
+    /// </param>
+    /// <param name="livenessProbe">
+    /// 存活检查用的探针（网络实现）。**必须与 <paramref name="probe"/> 分开**：
+    /// 存活检查发生在页面已经加载之后，用 WebView 探针会把用户正在看的页面导航走，
+    /// 这就是"反复刷新页面"的来源。默认回落到 <paramref name="probe"/>，
+    /// 便于既有测试与预览 harness 不改签名。
+    /// </param>
+    public SessionViewModel(
+        IEndpointProbe probe,
+        IServerLauncher launcher,
+        IEndpointProbe? livenessProbe = null)
     {
         _probe = probe;
+        _livenessProbe = livenessProbe ?? probe;
         _launcher = launcher;
         _state.PhaseChanged += (_, p) => Phase = p;
     }
@@ -343,7 +358,9 @@ public sealed class SessionViewModel : ViewModelBase, IDisposable
     {
         try
         {
-            var probe = await _probe.ProbeAsync(cfg.DefaultUrl, ct);
+            // 走网络探针，绝不走 WebView：本方法在设置窗口每次打开时都会跑，
+            // 用 WebView 探针会把用户正在看的页面导航走（"反复刷新"的主因之一）。
+            var probe = await _livenessProbe.ProbeAsync(cfg.DefaultUrl, ct);
             // 端口有应答（200 或 401 等非 200）就说明服务活着 —— 裸 DefaultUrl 常返回 401，
             // 那是"要 token"而不是"没在跑"。只有连不上（Unreachable）才算没服务。
             ServiceRunning = probe.Outcome != ProbeOutcome.Unreachable;
@@ -412,7 +429,7 @@ public sealed class SessionViewModel : ViewModelBase, IDisposable
             // 判定用 != Unreachable：端口有应答（含 401）就说明实例已在，重复拉起只会撞端口。
             // 这里**不动归属** —— 归属回答"是不是本软件拉起的"，预探测答不了这个问题；
             // 若本来就归我们（慢启动重入），清掉会把它误判成外部实例。
-            var pre = await _probe.ProbeAsync(cfg.DefaultUrl, ct);
+            var pre = await _livenessProbe.ProbeAsync(cfg.DefaultUrl, ct);
             if (pre.Outcome != ProbeOutcome.Unreachable)
             {
                 Log($"[session] 服务已在运行（探测 outcome={pre.Outcome}），跳过启动");
@@ -436,7 +453,7 @@ public sealed class SessionViewModel : ViewModelBase, IDisposable
                 _state.Reset();
             }
 
-            var post = await _probe.ProbeAsync(cfg.DefaultUrl, ct);
+            var post = await _livenessProbe.ProbeAsync(cfg.DefaultUrl, ct);
             // 后探测只用来确认"端口有没有应答"，不反向清归属：真正启动失败时
             // LaunchAndCaptureAsync 已把 ServiceOwned 置 false；这里若因"抓到 URL 但端口还没绑好"
             // 的瞬态未应答而清归属，慢启动的自家实例就会被误报成外部实例。

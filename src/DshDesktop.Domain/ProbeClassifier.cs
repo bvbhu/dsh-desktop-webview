@@ -26,4 +26,27 @@ public static class ProbeClassifier
             ? ProbeOutcome.Ok
             : ProbeOutcome.Other;
     }
+
+    /// <summary>
+    /// 把一次**网络层**存活检查（<c>HttpEndpointProbe</c>）的 HTTP 状态码归类。
+    /// <para>
+    /// 与 <see cref="ClassifyNavigation"/> 的区别：这里没有"错误页冒充 200"的问题
+    /// —— 请求由 <c>HttpClient</c> 直接发出，拿到的就是服务器的真实应答，
+    /// 所以不必做 4xx/5xx 的白名单。语义保持一致：
+    /// </para>
+    /// <list type="bullet">
+    /// <item>2xx → <see cref="ProbeOutcome.Ok"/></item>
+    /// <item>其余任何状态码（含 401/403）→ <see cref="ProbeOutcome.Other"/>：服务活着，只是要 token（§4.7）</item>
+    /// <item><paramref name="statusCode"/> 为 null = 连接失败/超时 → <see cref="ProbeOutcome.Unreachable"/></item>
+    /// </list>
+    /// </summary>
+    public static ProbeOutcome ClassifyHttpStatus(int? statusCode)
+    {
+        if (statusCode is null)
+            return ProbeOutcome.Unreachable;
+
+        return statusCode is >= 200 and <= 299
+            ? ProbeOutcome.Ok
+            : ProbeOutcome.Other;
+    }
 }
