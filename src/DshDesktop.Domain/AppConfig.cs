@@ -22,7 +22,10 @@ public sealed record AppConfig(
     int WindowWidth,
     int WindowHeight,
     bool WindowMaximized,
-    bool UseHwndHost)
+    bool UseHwndHost,
+    bool OpenExternalLinksEnabled,
+    string ExternalLinkUrlRegex,
+    string ExternalBrowserPath)
 {
     public static AppConfig CreateDefault() => new(
         DefaultUrl: "http://127.0.0.1:3080/",
@@ -56,5 +59,11 @@ public sealed record AppConfig(
         WindowMaximized: false,
         // false = 合成宿主（页面铺满整窗）。改 true 才用 HwndHost 版：顶栏退回实心 40px 条，
         // 换来文件拖放 —— 合成版没有子 HWND，收不到 OLE 拖放。
-        UseHwndHost: false);
+        UseHwndHost: false,
+        // 页面里的外部链接交给系统默认浏览器（而不是 WebView2 自带弹窗）。
+        // 正则默认值 = "非 IP 字面量且非 localhost"，即"域名主机名"，详见 ExternalLinkPolicy 的注释。
+        OpenExternalLinksEnabled: true,
+        ExternalLinkUrlRegex: ExternalLinkPolicy.DefaultUrlRegex,
+        // 空 = 系统默认浏览器；非空 = 指定 exe（URL 作为唯一参数传入）。
+        ExternalBrowserPath: string.Empty);
 }

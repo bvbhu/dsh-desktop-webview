@@ -65,6 +65,9 @@ internal sealed class ConfigDto
     public int WindowHeight { get; set; } = D.WindowHeight;
     public bool WindowMaximized { get; set; } = D.WindowMaximized;
     public bool UseHwndHost { get; set; } = D.UseHwndHost;
+    public bool OpenExternalLinksEnabled { get; set; } = D.OpenExternalLinksEnabled;
+    public string ExternalLinkUrlRegex { get; set; } = D.ExternalLinkUrlRegex;
+    public string ExternalBrowserPath { get; set; } = D.ExternalBrowserPath;
 
     public static ConfigDto FromAppConfig(AppConfig c) => new()
     {
@@ -90,6 +93,9 @@ internal sealed class ConfigDto
         WindowHeight = c.WindowHeight,
         WindowMaximized = c.WindowMaximized,
         UseHwndHost = c.UseHwndHost,
+        OpenExternalLinksEnabled = c.OpenExternalLinksEnabled,
+        ExternalLinkUrlRegex = c.ExternalLinkUrlRegex,
+        ExternalBrowserPath = c.ExternalBrowserPath,
     };
 
     public AppConfig ToAppConfig() => new(
@@ -114,5 +120,8 @@ internal sealed class ConfigDto
         WindowWidth,
         WindowHeight,
         WindowMaximized,
-        UseHwndHost);
+        UseHwndHost,
+        OpenExternalLinksEnabled,
+        ExternalLinkUrlRegex,
+        ExternalBrowserPath);
 }

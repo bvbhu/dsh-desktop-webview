@@ -257,7 +257,7 @@
                         </Grid>
 
                         <local:SelectableHint Label="悬停延迟 (ms)"
-                                              Text="鼠标移入右上角后多少毫秒切换窗口控制按钮显示，默认值：800"
+                                              Text="鼠标在右上角悬停多长时间切换窗口控制按钮显示，默认800"
                                               Margin="0,0,0,6" />
                         <TextBox Style="{StaticResource SettingsTextBoxStyle}" Margin="0,0,0,14"
                                  Text="{Binding ChromeHoverDelayMs, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
@@ -299,10 +299,43 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="兼容模式" Style="{StaticResource SectionHeaderStyle}" Margin="0" VerticalAlignment="Center" />
                             <CheckBox Grid.Column="2" Style="{StaticResource SettingsCheckBoxStyle}"
-                                      Content="启用 HwndHost" VerticalAlignment="Center"
+                                      Content="启用" VerticalAlignment="Center"
                                       IsChecked="{Binding UseHwndHost, Mode=TwoWay}" />
                         </Grid>
-                        <local:SelectableHint Text="启用后改用系统标题栏与 HwndHost 宿主，可以拖放文件到页面；默认的合成宿主没有子窗口，收不到系统拖放。&#x0a;代价：自绘顶栏与三键收起，改成系统标题栏。重新启动后生效。" />
+                        <local:SelectableHint Text="改用系统标题栏与 HwndHost 宿主，可以拖放文件到页面，重新启动后生效。" />
+                    </StackPanel>
+                </Border>
+
+                <!-- ===== 外部链接（2026-09-26 新增：页面里的链接改用系统默认浏览器打开） ===== -->
+                <Border Style="{StaticResource SectionCardStyle}">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,6">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0" Text="使用外部浏览器打开外部链接" Style="{StaticResource SectionHeaderStyle}" Margin="0" VerticalAlignment="Center" />
+                            <CheckBox Grid.Column="2" Style="{StaticResource SettingsCheckBoxStyle}"
+                                      Content="启用" VerticalAlignment="Center"
+                                      IsChecked="{Binding OpenExternalLinksEnabled, Mode=TwoWay}" />
+                        </Grid>
+
+                        <!-- 配置块：关掉功能就整块隐藏 —— 关着还让用户填正则和浏览器位置只会造成"改了没反应"。 -->
+                        <StackPanel Visibility="{Binding OpenExternalLinksEnabled, Converter={StaticResource BoolVis}}">
+
+                            <local:SelectableHint Label="URL 正则"
+                                                  Text="匹配该正则的链接才交给外部浏览器。默认只匹配域名（非 IP 字面量、非 localhost），例如 github.com 会交给浏览器，而 127.0.0.1 留在软件内。&#x0a;留空等同于关闭本功能）。"
+                                                  Margin="0,0,0,6" />
+                            <TextBox Style="{StaticResource MonoTextBoxStyle}" Margin="0,0,0,14"
+                                     Text="{Binding ExternalLinkUrlRegex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                            <local:SelectableHint Label="浏览器位置"
+                                                  Text="填写浏览器 exe 的完整路径（支持 %LOCALAPPDATA% 这类环境变量），留空则使用系统默认浏览器。"
+                                                  Margin="0,0,0,6" />
+                            <TextBox Style="{StaticResource SettingsTextBoxStyle}" Margin="0"
+                                     Text="{Binding ExternalBrowserPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
 
@@ -318,7 +351,7 @@
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0" Text="拖动层" Style="{StaticResource SectionHeaderStyle}" Margin="0" VerticalAlignment="Center" />
                             <local:SelectableHint Grid.Column="1" VerticalAlignment="Center" Margin="10,0,12,0"
-                                                  Text="覆盖在页面上方的拖动层，会挡住其覆盖区域的页面交互。" />
+                                                  Text="覆盖在页面上方的拖动层，会影响其覆盖区域的页面交互。" />
                             <CheckBox Grid.Column="2" Style="{StaticResource SettingsCheckBoxStyle}"
                                       Content="启用" VerticalAlignment="Center"
                                       IsChecked="{Binding DragStripEnabled, Mode=TwoWay}" />

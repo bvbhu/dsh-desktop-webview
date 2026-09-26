@@ -108,6 +108,10 @@ internal static class Program
         if (wants("main"))
             return RenderMain(app, outFile);
 
+        // "ext-links-e2e"：真实 WebView2 端到端验证「点链接 → 交给外部浏览器」。
+        if (wants("ext-links-e2e"))
+            return RenderExternalLinksEndToEnd(app, outFile);
+
         // "needs-token" forces a real 401 probe: Phase's setter is private and faking it would not
         // prove the panel's visibility binding works.
         var needsToken = wants("needs-token");
@@ -219,9 +223,13 @@ internal static class Program
         // Show the TOP of the scroll region, where the console card (with the URL field and the
         // temp-URL panel inside it) lives — scrolling elsewhere renders the region we are NOT
         // inspecting. This said ScrollToEnd before the reorder.
+        // "scroll-end" 覆盖这个默认：把滚动区拉到底，用于检查**最后几张卡片**（外部链接在末尾）。
         if (FindScrollViewer(window) is { } scroller)
         {
-            scroller.ScrollToTop();
+            if (wants("scroll-end"))
+                scroller.ScrollToEnd();
+            else
+                scroller.ScrollToTop();
             window.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
             window.UpdateLayout();
         }
@@ -414,6 +422,248 @@ internal static class Program
         return visibleOk && hiddenOk && zOk ? 0 : 4;
     }
 
+    /// <summary>
+    /// 真实 WebView2 端到端验证：页面里用 <b>DSH 前端一模一样的调用形态</b>
+    /// （<c>window.open(url, "_blank", "noopener,noreferrer")</c>）开链接，断言
+    /// ① 命中正则的链接被交给外部浏览器、② 本机链接仍留在 WebView2、
+    /// ③ <c>Handled=true</c> 真的压住了 WebView2 自带弹窗、④ 关闭开关后完全不接管。
+    /// <para>
+    /// 这一步不可省：单测只证明判定函数对，证明不了 <c>NewWindowRequested</c> 在真实 WebView2 上
+    /// 确实会为这个调用形态触发、且接管真的生效。
+    /// </para>
+    /// </summary>
+    private static int RenderExternalLinksEndToEnd(App app, string outFile)
+    {
+        app.DispatcherUnhandledException += (_, args) =>
+        {
+            Console.WriteLine($"[e2e] dispatch-exception {args.Exception.GetType().Name}: {args.Exception.Message}");
+            args.Handled = true;
+        };
+
+        var scratch = Path.Combine(AppContext.BaseDirectory, "ext-links-scratch");
+        Directory.CreateDirectory(scratch);
+
+        var browser = new RecordingBrowser();
+        var config = AppConfig.CreateDefault() with
+        {
+            DefaultUrl = "about:blank",
+            ServiceStrategy = ServiceStrategy.NeverStart,
+        };
+
+        var (window, _) = BuildMainWindow(config, Path.Combine(scratch, "profile"), browser);
+        window.Show();
+
+        // 默认宿主是**合成版**：它不是 XAML 里声明的 `WebView`（那是 hwnd 版的退路），
+        // 而是运行时 new 出来塞进 WebHost 的 WebView2CompositionControl —— 必须按类型找。
+        var core = WaitForCore(window, () => FindHostCore(window), TimeSpan.FromSeconds(20));
+        if (core is null)
+        {
+            Console.Error.WriteLine("[e2e] FAIL CoreWebView2 未就绪，无法验证");
+            window.Close();
+            app.Shutdown();
+            return 6;
+        }
+
+        PumpFor(window, TimeSpan.FromSeconds(1.5));
+        core.NavigateToString("<html><body>e2e</body></html>");
+        PumpFor(window, TimeSpan.FromSeconds(2));
+
+        // ① 异源域名：必须被交给外部浏览器，且**不得**多出 WebView2 弹窗。
+        var before = CountWebViewTopLevelWindows();
+        var scriptResult = RunScript(window, core,
+            "window.open('https://github.com/deepseek-ai/deepseek-harness','_blank','noopener,noreferrer'); 'ok'");
+        PumpFor(window, TimeSpan.FromSeconds(1.5));
+        var after = CountWebViewTopLevelWindows();
+        var noPopup = after <= before;
+        Console.WriteLine($"[e2e] chromeWidgetWindows before={before} after={after} noPopup={noPopup}");
+
+        // ② 本机：必须**不**接管
+        RunScript(window, core,
+            "window.open('http://127.0.0.1:3080/','_blank','noopener,noreferrer'); 'ok'");
+        PumpFor(window, TimeSpan.FromSeconds(1.5));
+
+        var opened = browser.Opened.ToArray();
+        Console.WriteLine($"[e2e] scriptResult={scriptResult} openedCount={opened.Length} "
+            + $"opened=[{string.Join(", ", opened)}]");
+
+        var extOk = opened.Length == 1
+            && opened[0] == "https://github.com/deepseek-ai/deepseek-harness";
+        var localOk = !opened.Any(u => u.Contains("127.0.0.1"));
+
+        SaveRender(window, outFile);
+        window.Close();
+
+        // ③ 对照组：关闭开关后必须完全不接管，且**应当**出现 WebView2 自带弹窗 ——
+        // 这一组同时证明上面的 noPopup 检查有牙齿（不是恒真）。
+        var disabledBrowser = new RecordingBrowser();
+        var disabledConfig = config with { OpenExternalLinksEnabled = false };
+        var (windowOff, _) = BuildMainWindow(
+            disabledConfig, Path.Combine(scratch, "profile-off"), disabledBrowser);
+        windowOff.Show();
+        var coreOff = WaitForCore(windowOff, () => FindHostCore(windowOff), TimeSpan.FromSeconds(20));
+        var offOk = false;
+        var controlPopup = false;
+        if (coreOff is not null)
+        {
+            PumpFor(windowOff, TimeSpan.FromSeconds(1.5));
+            coreOff.NavigateToString("<html><body>off</body></html>");
+            PumpFor(windowOff, TimeSpan.FromSeconds(1.5));
+            var offBefore = CountWebViewTopLevelWindows();
+            RunScript(windowOff, coreOff,
+                "window.open('https://github.com/deepseek-ai/deepseek-harness','_blank','noopener,noreferrer'); 'ok'");
+            PumpFor(windowOff, TimeSpan.FromSeconds(2.5));
+            var offAfter = CountWebViewTopLevelWindows();
+            offOk = disabledBrowser.Opened.Count == 0;
+            controlPopup = offAfter > offBefore;
+            Console.WriteLine($"[e2e] disabled openedCount={disabledBrowser.Opened.Count} "
+                + $"chromeWidgetWindows {offBefore}->{offAfter} controlPopupAppeared={controlPopup}");
+        }
+        else
+        {
+            Console.Error.WriteLine("[e2e] 关闭态窗口 CoreWebView2 未就绪");
+        }
+
+        windowOff.Close();
+        app.Shutdown();
+        Cleanup(scratch);
+
+        var allOk = extOk && localOk && offOk && noPopup && controlPopup;
+        Console.WriteLine(allOk
+            ? "[e2e] PASS 命中正则的链接交给外部浏览器（且未弹 WebView2 窗口），本机链接仍留在 WebView2，关闭开关后完全不接管"
+            : "[e2e] FAIL " + (extOk ? string.Empty : "external-link-not-forwarded ")
+                + (localOk ? string.Empty : "loopback-was-forwarded ")
+                + (offOk ? string.Empty : "disabled-still-forwarded ")
+                + (noPopup ? string.Empty : "webview-popup-was-not-suppressed ")
+                + (controlPopup ? string.Empty : "control-group-shows-no-popup(check-has-no-teeth)"));
+        return allOk ? 0 : 7;
+    }
+
+    /// <summary>
+    /// 数可见的 <c>Chrome_WidgetWin_1</c> 顶层窗口（<b>不限进程</b>）。
+    /// <para>
+    /// 不能按本进程 pid 过滤：WebView2 的弹窗是**浏览器进程**（msedgewebview2.exe）创建的，
+    /// 宿主进程的窗口集合里根本看不到它 —— 按 pid 过滤时对照组也数不出弹窗，
+    /// 那个断言就毫无牙齿（实测 controlPopupAppeared=False）。
+    /// </para>
+    /// </summary>
+    private static int CountWebViewTopLevelWindows()
+    {
+        var count = 0;
+        EnumWindows((hwnd, _) =>
+        {
+            if (!IsWindowVisible(hwnd))
+                return true;
+            var cls = new System.Text.StringBuilder(64);
+            if (GetClassName(hwnd, cls, cls.Capacity) > 0
+                && cls.ToString() == "Chrome_WidgetWin_1")
+                count++;
+            return true;
+        }, IntPtr.Zero);
+        return count;
+    }
+
+    private delegate bool EnumWindowsProc(IntPtr hwnd, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern bool IsWindowVisible(IntPtr hwnd);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr hwnd, System.Text.StringBuilder name, int maxCount);
+
+    /// <summary>执行脚本并**边等边泵 Dispatcher**。</summary>
+    /// <remarks>
+    /// 绝不能用 <c>ExecuteScriptAsync(...).GetAwaiter().GetResult()</c>：本方法跑在 STA 主线程上，
+    /// 而 WebView2 的续延要回到同一个线程的消息泵 —— 阻塞等待就是死锁（实测挂满 5 分钟无输出）。
+    /// </remarks>
+    private static string? RunScript(
+        Window window, Microsoft.Web.WebView2.Core.CoreWebView2 core, string script)
+    {
+        var task = core.ExecuteScriptAsync(script);
+        var sw = Stopwatch.StartNew();
+        while (!task.IsCompleted && sw.Elapsed < TimeSpan.FromSeconds(15))
+        {
+            window.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+            Thread.Sleep(20);
+        }
+
+        if (!task.IsCompleted)
+        {
+            Console.WriteLine("[e2e] 脚本执行超时（WebView2 未在 15s 内返回）");
+            return null;
+        }
+
+        return task.GetAwaiter().GetResult();
+    }
+
+    /// <summary>取当前生效宿主的 CoreWebView2：优先合成版，其次 hwnd 版（与 MainWindow.Core 同序）。</summary>
+    private static Microsoft.Web.WebView2.Core.CoreWebView2? FindHostCore(Window window)
+    {
+        if (window.FindName("WebHost") is not Panel host)
+            return null;
+
+        foreach (var child in host.Children)
+        {
+            switch (child)
+            {
+                case Microsoft.Web.WebView2.Wpf.WebView2CompositionControl composition:
+                    return composition.CoreWebView2;
+                case Microsoft.Web.WebView2.Wpf.WebView2 hwnd:
+                    return hwnd.CoreWebView2;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>轮询等待 CoreWebView2 就绪（WebView2 初始化是异步的，固定 sleep 不可靠）。</summary>
+    private static Microsoft.Web.WebView2.Core.CoreWebView2? WaitForCore(
+        Window window, Func<Microsoft.Web.WebView2.Core.CoreWebView2?> get, TimeSpan timeout)
+    {
+        var sw = Stopwatch.StartNew();
+        while (sw.Elapsed < timeout)
+        {
+            var core = get();
+            if (core is not null)
+                return core;
+            window.Dispatcher.Invoke(() => { }, DispatcherPriority.Background);
+            Thread.Sleep(50);
+        }
+
+        return get();
+    }
+
+    private static void Cleanup(string dir)
+    {
+        for (var attempt = 0; attempt < 2; attempt++)
+        {
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+                break;
+            }
+            catch when (attempt == 0)
+            {
+                Thread.Sleep(500);
+            }
+            catch { }
+        }
+    }
+
+    /// <summary>记录被交给"外部浏览器"的 URL；不真的启动浏览器（自动化里绝不能弹真窗口）。</summary>
+    private sealed class RecordingBrowser : IExternalBrowser
+    {
+        public List<string> Opened { get; } = new();
+
+        public string? Open(string url)
+        {
+            Opened.Add(url);
+            return null;
+        }
+    }
+
     private static (MainWindow Window, SessionViewModel Session) BuildMainWindow(AppConfig config, string profileDir)
     {
         var configStore = new ConfigStore(Path.Combine(profileDir, "config.json"));
@@ -427,6 +677,29 @@ internal static class Program
 
         var window = new MainWindow(config, shell, session, settings, configStore, probe,
             profileDir)
+        {
+            Left = -4000,
+            Top = -4000,
+            ShowInTaskbar = false,
+        };
+        return (window, session);
+    }
+
+    /// <summary>带可注入浏览器启动器的版本（e2e 用假实现，避免自动化里真的弹出浏览器窗口）。</summary>
+    private static (MainWindow Window, SessionViewModel Session) BuildMainWindow(
+        AppConfig config, string profileDir, IExternalBrowser browser)
+    {
+        var configStore = new ConfigStore(Path.Combine(profileDir, "config.json"));
+        var probe = new WebViewProbe();
+        var launcher = new CommandLauncher();
+        var shell = new ShellViewModel();
+        shell.RestoreFrom(config);
+        var session = new SessionViewModel(probe, launcher);
+        var settings = new SettingsViewModel(config);
+        session.LogLine += Console.WriteLine;
+
+        var window = new MainWindow(config, shell, session, settings, configStore, probe,
+            profileDir, runLog: null, launcher: launcher, livenessProbe: null, externalBrowser: browser)
         {
             Left = -4000,
             Top = -4000,

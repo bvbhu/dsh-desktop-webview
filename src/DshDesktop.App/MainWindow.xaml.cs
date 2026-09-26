@@ -27,11 +27,14 @@ public partial class MainWindow : System.Windows.Window
     /// </summary>
     private readonly IEndpointProbe _livenessProbe;
     private readonly CommandLauncher? _launcherRef;
+    /// <summary>外部浏览器启动器（设置窗口改"浏览器位置"后要读到新值，所以它按委托取配置）。</summary>
+    private readonly IExternalBrowser _externalBrowser;
 
     /// <summary>
     /// 外部链接判定策略的缓存。配置在设置窗口保存后就地换掉，所以保存路径里要置空重建
     /// （见 <see cref="OnConfigSaved"/>）—— 否则"改了正则要重启才生效"。
     /// </summary>
+    private ExternalLinkPolicy? _externalLinkPolicy;
     private readonly string _webViewProfilePath;
     private readonly RunLog? _runLog;
     private SettingsWindow? _settingsWindow;
@@ -122,7 +125,8 @@ public partial class MainWindow : System.Windows.Window
         string webViewProfilePath,
         RunLog? runLog = null,
         CommandLauncher? launcher = null,
-        IEndpointProbe? livenessProbe = null)
+        IEndpointProbe? livenessProbe = null,
+        IExternalBrowser? externalBrowser = null)
     {
         InitializeComponent();
         _config = config;
@@ -135,6 +139,9 @@ public partial class MainWindow : System.Windows.Window
         _webViewProfilePath = webViewProfilePath;
         _runLog = runLog;
         _launcherRef = launcher;
+        // 用委托而非快照字符串：设置窗口保存后 _config 会就地换掉，
+        // 快照会让"改了浏览器位置"直到重启才生效。
+        _externalBrowser = externalBrowser ?? new ShellExternalBrowser(() => _config.ExternalBrowserPath);
 
         // 就绪等待器全程只有一个实例：同一时刻只允许一轮轮询在跑（单次 in-flight），
         // 避免"导航重试"与"启动后确认探测"两条链各自打满 WebView。
@@ -1106,6 +1113,62 @@ public partial class MainWindow : System.Windows.Window
         // 它的 NavigationCompleted 才算"页面加载完成"（浮层消失的时刻）。
         core.NavigationStarting += OnCoreNavigationStarting;
         // 页面里的 window.open / target="_blank" 走这里：默认会弹 WebView2 自带窗口，
+        // 我们要按配置把它交给外部浏览器（见 OnCoreNewWindowRequested）。
+        core.NewWindowRequested += OnCoreNewWindowRequested;
+    }
+
+    /// <summary>
+    /// 页面请求开新窗口（<c>window.open</c> / <c>target="_blank"</c>）。
+    /// <para>
+    /// DSH 前端的链接点击链是 <c>openExternalLink</c> → <c>window.open(url,"_blank")</c>
+    /// （见 <c>dsh-client-ui-chat</c> 的 client.js），所以这里就是"点链接"的落点。
+    /// </para>
+    /// <para>
+    /// <b><c>Handled = true</c> 必须显式设置</b>：官方语义是"Handled=false 且未设 NewWindow
+    /// → WebView2 打开它自带的弹窗窗口"，不设就白改。
+    /// </para>
+    /// <para>
+    /// 判定交给 <see cref="ExternalLinkPolicy"/>（Domain 纯函数，可单测）：只接管 http/https
+    /// 且命中正则的 URL；<c>about:</c> / <c>blob:</c> / <c>data:</c> 等一律保持原生行为 ——
+    /// 对它们一刀切会把打印预览和下载打断。
+    /// </para>
+    /// </summary>
+    private void OnCoreNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        // 策略缓存：正则用 RegexOptions.Compiled 编译，逐次新建会在每次点击时重编译一遍。
+        var policy = _externalLinkPolicy ??= BuildExternalLinkPolicy();
+
+        if (policy.Decide(e.Uri) != ExternalLinkDecision.OpenInBrowser)
+            return;
+
+        try
+        {
+            // 必须显式置位，否则 WebView2 照旧弹它自带的窗口。
+            e.Handled = true;
+            _runLog?.Append($"[nav] 外部链接交给外部浏览器 {LogRedaction.Url(e.Uri)}");
+            if (_externalBrowser.Open(e.Uri) is { } reason)
+                _session.Note($"外部浏览器未按配置启动：{reason}");
+        }
+        catch (Exception ex)
+        {
+            // 事件回调里绝不能让异常冒到 Dispatcher（会弹「发生未处理异常」）。
+            _runLog?.Append($"[nav-fail] 外部浏览器启动异常：{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 按当前生效配置构造判定策略。<b>非法正则只在这里记一次日志</b>：
+    /// 若放进事件回调，用户每点一次链接都会刷一行同样的错误。
+    /// </summary>
+    private ExternalLinkPolicy BuildExternalLinkPolicy()
+    {
+        var policy = new ExternalLinkPolicy(
+            _config.OpenExternalLinksEnabled, _config.ExternalLinkUrlRegex);
+
+        if (policy.PatternError is { } patternError)
+            _runLog?.Append($"[nav] 外部链接正则无效，已停用该功能：{patternError}");
+
+        return policy;
     }
 
     private void SetupContextMenu(CoreWebView2 core)
@@ -1461,6 +1524,8 @@ public partial class MainWindow : System.Windows.Window
     {
         _config = _shell.ApplyTo(cfg);
         _configStore.Save(_config);
+        // 外部链接策略按旧配置缓存过：不置空则改了开关/正则要重启才生效。
+        _externalLinkPolicy = null;
         ApplyAppearance();
         _runLog?.Append("[config] 设置已保存，外观即时套用");
     }

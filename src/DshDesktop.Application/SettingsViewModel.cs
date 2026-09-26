@@ -29,6 +29,9 @@ public sealed class SettingsViewModel : ViewModelBase
     private string _dragStripColor;
     private double _dragStripOpacity;
     private bool _useHwndHost;
+    private bool _openExternalLinksEnabled;
+    private string _externalLinkUrlRegex;
+    private string _externalBrowserPath;
     private string? _validationError;
 
     public string DefaultUrl { get => _defaultUrl; set => Set(ref _defaultUrl, value); }
@@ -88,6 +91,31 @@ public sealed class SettingsViewModel : ViewModelBase
     /// 代价是页面不再铺满整窗（顶栏退回实心 40px 条）。下次启动生效 —— 宿主在窗口构造期选定。
     /// </summary>
     public bool UseHwndHost { get => _useHwndHost; set => Set(ref _useHwndHost, value); }
+
+    /// <summary>页面里的外部链接是否交给系统默认浏览器（关 = 维持 WebView2 原生行为）。</summary>
+    public bool OpenExternalLinksEnabled
+    {
+        get => _openExternalLinksEnabled;
+        set => Set(ref _openExternalLinksEnabled, value);
+    }
+
+    /// <summary>
+    /// 判定"哪些 URL 算外部链接"的正则。<b>留空 = 功能禁用</b>（与 <c>successMarkerRegex</c>
+    /// 同一约定），默认值是"非 IP 字面量且非 localhost"的域名主机名规则，
+    /// 详见 <see cref="ExternalLinkPolicy.DefaultUrlRegex"/>。
+    /// </summary>
+    public string ExternalLinkUrlRegex
+    {
+        get => _externalLinkUrlRegex;
+        set => Set(ref _externalLinkUrlRegex, value);
+    }
+
+    /// <summary>浏览器可执行文件路径；空 = 系统默认浏览器。指向不存在的文件时运行时回落系统默认。</summary>
+    public string ExternalBrowserPath
+    {
+        get => _externalBrowserPath;
+        set => Set(ref _externalBrowserPath, value);
+    }
     public int DragStripLeftInset { get => _dragStripLeftInset; set => Set(ref _dragStripLeftInset, value); }
     public int DragStripRightInset { get => _dragStripRightInset; set => Set(ref _dragStripRightInset, value); }
     public int DragStripHeight { get => _dragStripHeight; set => Set(ref _dragStripHeight, value); }
@@ -152,7 +180,8 @@ public sealed class SettingsViewModel : ViewModelBase
     // Nullable 严格模式下，赋值拆进方法后编译器看不到字段已初始化，需显式声明。
     [MemberNotNull(nameof(_defaultUrl), nameof(_launchCommand), nameof(_urlExtractRegex),
         nameof(_successMarkerRegex), nameof(_workingDirectory), nameof(_chromeButtonIconColor),
-        nameof(_chromeButtonBackground), nameof(_dragStripColor))]
+        nameof(_chromeButtonBackground), nameof(_dragStripColor), nameof(_externalLinkUrlRegex),
+        nameof(_externalBrowserPath))]
     private void ApplyConfig(AppConfig config)
     {
         _defaultUrl = config.DefaultUrl;
@@ -172,6 +201,9 @@ public sealed class SettingsViewModel : ViewModelBase
         _dragStripColor = config.DragStripColor;
         _dragStripOpacity = config.DragStripOpacity;
         _useHwndHost = config.UseHwndHost;
+        _openExternalLinksEnabled = config.OpenExternalLinksEnabled;
+        _externalLinkUrlRegex = config.ExternalLinkUrlRegex;
+        _externalBrowserPath = config.ExternalBrowserPath;
     }
 
     /// <summary>保存成功后把当前配置立为新基线。</summary>
@@ -197,6 +229,14 @@ public sealed class SettingsViewModel : ViewModelBase
         if (!IsValidRegex(_successMarkerRegex))
         {
             ValidationError = "成功标志正则无效";
+            return false;
+        }
+
+        // 外部链接正则：留空 = 功能禁用（合法）；非空才校验语法。
+        // 不能因为空值报错 —— 那会让"我想关掉这个功能"变成保存不了。
+        if (!string.IsNullOrWhiteSpace(_externalLinkUrlRegex) && !IsValidRegex(_externalLinkUrlRegex))
+        {
+            ValidationError = "外部链接正则无效";
             return false;
         }
 
@@ -253,6 +293,9 @@ public sealed class SettingsViewModel : ViewModelBase
             DragStripColor = _dragStripColor,
             DragStripOpacity = _dragStripOpacity,
             UseHwndHost = _useHwndHost,
+            OpenExternalLinksEnabled = _openExternalLinksEnabled,
+            ExternalLinkUrlRegex = _externalLinkUrlRegex.Trim(),
+            ExternalBrowserPath = _externalBrowserPath.Trim(),
         };
     }
 

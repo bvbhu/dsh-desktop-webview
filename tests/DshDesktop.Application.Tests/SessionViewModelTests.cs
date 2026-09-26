@@ -718,6 +718,94 @@ public class SessionViewModelTests
         vm.DefaultUrl.Should().Be("http://127.0.0.1:9999/");
     }
 
+    // ---- 外部链接（开关 / 正则 / 浏览器位置） ----
+
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_DefaultToEnabledWithDomainRegex()
+    {
+        var d = AppConfig.CreateDefault();
+        var vm = new SettingsViewModel(d);
+
+        vm.OpenExternalLinksEnabled.Should().BeTrue();
+        vm.ExternalLinkUrlRegex.Should().Be(ExternalLinkPolicy.DefaultUrlRegex);
+        vm.ExternalBrowserPath.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_RoundTripThroughBuildConfig()
+    {
+        var vm = new SettingsViewModel(AppConfig.CreateDefault())
+        {
+            OpenExternalLinksEnabled = false,
+            ExternalLinkUrlRegex = "^https://example\\.com/",
+            ExternalBrowserPath = @"C:\browsers\chrome.exe",
+        };
+
+        var cfg = vm.BuildConfig();
+
+        cfg.OpenExternalLinksEnabled.Should().BeFalse();
+        cfg.ExternalLinkUrlRegex.Should().Be("^https://example\\.com/");
+        cfg.ExternalBrowserPath.Should().Be(@"C:\browsers\chrome.exe");
+    }
+
+    /// <summary>落盘前 Trim：带空白的正则/路径是"设置不生效"的经典来源（与颜色字段同一处理）。</summary>
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_TrimsRegexAndPath()
+    {
+        var vm = new SettingsViewModel(AppConfig.CreateDefault())
+        {
+            ExternalLinkUrlRegex = "  ^https://example\\.com/  ",
+            ExternalBrowserPath = "  C:\\browsers\\chrome.exe  ",
+        };
+
+        var cfg = vm.BuildConfig();
+
+        cfg.ExternalLinkUrlRegex.Should().Be("^https://example\\.com/");
+        cfg.ExternalBrowserPath.Should().Be(@"C:\browsers\chrome.exe");
+    }
+
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_RevertWithSnapshot()
+    {
+        var cfg = AppConfig.CreateDefault();
+        var vm = new SettingsViewModel(cfg)
+        {
+            OpenExternalLinksEnabled = false,
+            ExternalBrowserPath = @"C:\browsers\chrome.exe",
+        };
+
+        vm.RevertToSnapshot();
+
+        vm.OpenExternalLinksEnabled.Should().Be(cfg.OpenExternalLinksEnabled);
+        vm.ExternalBrowserPath.Should().Be(cfg.ExternalBrowserPath);
+    }
+
+    /// <summary>留空 = 功能禁用，属于合法配置；不能因为"空正则"就拒绝保存。</summary>
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_BlankRegexIsValid()
+    {
+        var vm = new SettingsViewModel(AppConfig.CreateDefault()) { ExternalLinkUrlRegex = "   " };
+
+        vm.Validate().Should().BeTrue();
+        vm.BuildConfig().ExternalLinkUrlRegex.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_InvalidRegexIsRejected()
+    {
+        var vm = new SettingsViewModel(AppConfig.CreateDefault()) { ExternalLinkUrlRegex = "([unclosed" };
+
+        vm.Validate().Should().BeFalse();
+        vm.ValidationError.Should().Contain("外部链接正则");
+    }
+
+    [Fact]
+    public void SettingsViewModel_ExternalLinks_DefaultRegexPassesValidation()
+    {
+        // 默认正则必须能通过保存校验，否则用户一开设置点保存就报错。
+        new SettingsViewModel(AppConfig.CreateDefault()).Validate().Should().BeTrue();
+    }
+
     [Fact]
     public async Task Session_ClearError_ClearsMessageOnly()
     {
