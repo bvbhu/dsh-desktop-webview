@@ -103,6 +103,7 @@ dotnet test  DSH-Desktop-Webview.sln -c Debug    # 全量单元测试
 | 约 30 秒后报「启动超时」 | 对照控制台实际输出检查 `urlExtractRegex` / `successMarkerRegex` |
 | `dsh` 起不来 | 曾强杀外壳会留下 `~/.dsh/.credentials.yaml.lock` 死锁：确认无 `dsh` 进程后删除该文件 |
 | 日志反复出现 `GpuProcessExited` | 多为虚拟显示适配器（远程 / 投屏驱动）环境问题，非程序缺陷，功能不受影响 |
+| 切换到别的虚拟桌面后，原桌面残留隐形层挡鼠标 / 新桌面无法交互 | WebView2 合成宿主（默认模式）的输入窗口是浏览器进程的顶层窗口，不随主窗口换虚拟桌面；已自动跟随主窗口所在桌面（`[shell] 主窗口所在虚拟桌面变化` 等日志可查）。仍异常时可在 `config.json` 打开 `"useHwndHost": true` 使用 hwnd 宿主（子窗口，天然跟随） |
 | 页面加载不出、日志 `[init-fail]` | 检查 WebView2 Runtime 是否安装 |
 | 日志 `[host-fallback]` | 合成宿主不可用已自动降级到 hwnd；也可以在设置中开启（在config.json中`"useHwndHost": true`）。 |
 | 首次运行弹「Windows 已保护你的电脑」 | 未签名的正常现象：点「更多信息」→「仍要运行」。不影响功能 |

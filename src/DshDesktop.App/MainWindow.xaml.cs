@@ -57,6 +57,18 @@ public partial class MainWindow : System.Windows.Window
     private NativeRect _lastVisibleRect;
     private bool _hasLastVisibleRect;
 
+    // ---- 虚拟桌面同步（2026-09-28）----
+    // WebView2 合成宿主的顶层输入窗口（Chrome_WidgetWin_1）是浏览器进程的窗口，虚拟桌面归属
+    // 不随主窗口变化：主窗口被挪到别的虚拟桌面后，它仍留在原桌面，表现为"隐藏的层"——
+    // 挡住桌面鼠标、新桌面上输入失效。这里用文档化的 IVirtualDesktopManager 把它搬到主窗口
+    // 所在桌面，并在主窗口不在当前桌面时隐藏残留（与最小化的处理同源，见 HideGhostWebViewWindows）。
+    private IVirtualDesktopManager? _virtualDesktop;
+    /// <summary>是否已尝试过创建 IVirtualDesktopManager：只折腾一次，失败（老系统等）就停用。</summary>
+    private bool _virtualDesktopChecked;
+    /// <summary>主窗口所在虚拟桌面的最后已知 id；变了就带 WebView2 顶层窗口一起搬。</summary>
+    private Guid _mainDesktopId = Guid.Empty;
+    private System.Windows.Threading.DispatcherTimer? _virtualDesktopSyncTimer;
+
     // ---- 拖动热区手势判别（备选1·透传点击）----
     // 合成版宿主必须捕获鼠标才能拖动窗口，因此改用手势判别：快速点按 → 把这次点击
     // 合成转发给页面；按下后拖动超过阈值 → 拖动窗口。四个字段只在左键按下期间有效。
@@ -212,6 +224,8 @@ public partial class MainWindow : System.Windows.Window
         OnStateChanged(this, EventArgs.Empty);
         Closing += OnClosing;
         Loaded += async (_, _) => await InitializeAsync();
+
+        StartVirtualDesktopSync();
     }
 
     /// <summary>
@@ -834,7 +848,7 @@ public partial class MainWindow : System.Windows.Window
     }
 
     /// <summary>最小化时隐藏 WebView2 的顶层输入窗口。</summary>
-    private void HideGhostWebViewWindows()
+    private void HideGhostWebViewWindows(string reason = "最小化")
     {
         // 句柄可能已被 WebView2 销毁（句柄复用很常见），先清掉再重新找。
         _ghostWebViewHwnds.RemoveAll(h => !IsWindow(h));
@@ -845,11 +859,11 @@ public partial class MainWindow : System.Windows.Window
         foreach (var hwnd in _ghostWebViewHwnds)
             ShowWindow(hwnd, SW_HIDE);
         if (_ghostWebViewHwnds.Count > 0)
-            _runLog?.Append($"[shell] 最小化：已隐藏 {_ghostWebViewHwnds.Count} 个 WebView2 顶层窗口");
+            _runLog?.Append($"[shell] {reason}：已隐藏 {_ghostWebViewHwnds.Count} 个 WebView2 顶层窗口");
     }
 
     /// <summary>还原时把先前藏掉的 WebView2 顶层窗口成对放回。</summary>
-    private void RestoreGhostWebViewWindows()
+    private void RestoreGhostWebViewWindows(string reason = "还原")
     {
         if (_ghostWebViewHwnds.Count == 0)
             return;
@@ -864,14 +878,211 @@ public partial class MainWindow : System.Windows.Window
         }
         _ghostWebViewHwnds.Clear();
         if (restored > 0)
-            _runLog?.Append($"[shell] 还原：已恢复 {restored} 个 WebView2 顶层窗口");
+            _runLog?.Append($"[shell] {reason}：已恢复 {restored} 个 WebView2 顶层窗口");
+    }
+
+    /// <summary>
+    /// 主窗口不在当前虚拟桌面时隐藏仍显示在当前桌面的 WebView2 顶层窗口。
+    /// 与最小化路径的区别：这里每次调用都重新枚举（不在当前桌面的整个期间都保证没有残留），
+    /// 且不设"已藏就不再处理"的保护 —— WebView2 崩溃重建等场景可能在期间长出新的顶层窗口。
+    /// </summary>
+    private void HideGhostWebViewWindowsFromCurrentDesktop()
+    {
+        var found = FindGhostWebViewWindows();
+        // 把最小化路径藏过、或在最小化列表里、或本次新找到的都统一收起。
+        var targets = new List<IntPtr>(_ghostWebViewHwnds);
+        foreach (var hwnd in found)
+        {
+            if (!targets.Contains(hwnd))
+                targets.Add(hwnd);
+        }
+        if (targets.Count == 0)
+            return;
+
+        var hidden = 0;
+        foreach (var hwnd in targets)
+        {
+            if (!IsWindow(hwnd) || !IsWindowVisible(hwnd))
+                continue;
+            ShowWindow(hwnd, SW_HIDE);
+            hidden++;
+        }
+        // 记住这批句柄，回到当前桌面时成对放回。只保留还活着的。
+        _ghostWebViewHwnds.Clear();
+        foreach (var hwnd in targets)
+        {
+            if (IsWindow(hwnd))
+                _ghostWebViewHwnds.Add(hwnd);
+        }
+        if (hidden > 0)
+            _runLog?.Append($"[shell] 主窗口不在当前虚拟桌面：已隐藏 {hidden} 个 WebView2 顶层窗口");
+    }
+
+    // ---- 虚拟桌面同步（2026-09-28）----
+
+    /// <summary>启动 1 秒轮询的虚拟桌面同步（构造函数调用一次）。</summary>
+    private void StartVirtualDesktopSync()
+    {
+        _virtualDesktopSyncTimer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1),
+        };
+        _virtualDesktopSyncTimer.Tick += (_, _) => SyncVirtualDesktop();
+        _virtualDesktopSyncTimer.Start();
+    }
+
+    /// <summary>关窗时停掉轮询，避免对象释放后还在后台跑。</summary>
+    private void StopVirtualDesktopSync() =>
+        _virtualDesktopSyncTimer?.Stop();
+
+    /// <summary>
+    /// 虚拟桌面同步：把 WebView2 顶层输入窗口的"虚拟桌面归属"钉在**主窗口所在桌面**上。
+    /// <para>
+    /// 背景：Windows 10/11 的虚拟桌面按**顶层窗口**登记归属（Explorer 只显示当前桌面上的窗口）。
+    /// 合成宿主的输入窗口是浏览器进程的顶层窗口，创建时被登记在当时的桌面；主窗口被挪到别的
+    /// 桌面（Task View 拖拽 / 右键「移动到」）后它**不会跟着走**——留在旧桌面成为挡住鼠标的
+    /// "隐藏的层"，而新桌面上应用的输入窗口缺失。
+    /// </para>
+    /// <para>
+    /// 两条腿：① <see cref="IVirtualDesktopManager.MoveWindowToDesktop"/> 把幽灵窗口搬到主窗口
+    /// 所在桌面，让系统在桌面向本应用显示/隐藏时一起带上它们（与主窗口同生共死）；
+    /// ② 主窗口不在当前桌面时显式隐藏幽灵窗口（与最小化同一套），回到当前桌面再放回——
+    /// 兜住搬移 API 失败或幽灵窗口创建在不同桌面的情况。
+    /// </para>
+    /// </summary>
+    private void SyncVirtualDesktop()
+    {
+        var vdm = EnsureVirtualDesktopManager();
+        if (vdm is null)
+            return;
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd == IntPtr.Zero)
+            return;
+
+        var minimized = IsIconic(hwnd);
+
+        // ① 主窗口所在的虚拟桌面变了（被挪到别的桌面）
+        if (vdm.GetWindowDesktopId(hwnd, out var mainDesktopId) == 0
+            && mainDesktopId != _mainDesktopId)
+        {
+            var firstKnown = _mainDesktopId == Guid.Empty;
+            _mainDesktopId = mainDesktopId;
+            MoveGhostWebViewWindowsToDesktop(mainDesktopId);
+            if (!firstKnown)
+                _runLog?.Append($"[shell] 主窗口所在虚拟桌面变化，已同步 WebView2 顶层窗口（桌面={mainDesktopId:N}）");
+        }
+
+        // 最小化期间的显隐归最小化路径管，桌面逻辑这里不插手。
+        if (minimized)
+            return;
+
+        // ② 主窗口在不在当前虚拟桌面；失败（负 HRESULT）就跳过本轮。
+        if (vdm.IsWindowOnCurrentVirtualDesktop(hwnd, out var onCurrent) < 0)
+            return;
+
+        if (onCurrent)
+        {
+            // 有被藏起的幽灵窗口（曾在别的桌面/最小化路径收过）：先搬回主窗口所在桌面再显示。
+            // 若它们因崩溃重建等落在别的桌面，直接 SW_SHOW 只会把它显示在错误的桌面上。
+            // 主窗口桌面 id 尚未读到（Guid.Empty，罕见）时略过搬移，只放回。
+            if (_ghostWebViewHwnds.Count > 0)
+            {
+                if (_mainDesktopId != Guid.Empty)
+                    MoveListedGhostWebViewWindowsToDesktop(_mainDesktopId);
+                RestoreGhostWebViewWindows("主窗口回到当前虚拟桌面");
+            }
+        }
+        else
+            HideGhostWebViewWindowsFromCurrentDesktop();
+    }
+
+    /// <summary>把已知的（含被藏起的）WebView2 顶层窗口搬到 <paramref name="desktopId"/> 所在虚拟桌面。</summary>
+    private void MoveGhostWebViewWindowsToDesktop(Guid desktopId)
+    {
+        if (_virtualDesktop is null)
+            return;
+
+        // 已知列表（可能已因最小化/桌面切换被藏起）+ 现场枚举可见的，一起去重合并。
+        // 搬家时必须连"已被 shell 藏起的"一起找：主窗口挪到别的桌面后，旧桌面上的幽灵窗口
+        // 会被系统隐藏（IsWindowVisible=false），不带 includeHidden 就永远找不到、搬不走。
+        var targets = new List<IntPtr>(_ghostWebViewHwnds);
+        foreach (var h in FindGhostWebViewWindows(includeHidden: true))
+        {
+            if (!targets.Contains(h))
+                targets.Add(h);
+        }
+
+        var moved = MoveGhostWebViewWindowListToDesktop(targets, desktopId);
+        if (moved > 0)
+            _runLog?.Append($"[shell] 已把 {moved} 个 WebView2 顶层窗口搬到主窗口所在虚拟桌面");
+    }
+
+    /// <summary>把「已知藏起列表」里还活着的 WebView2 顶层窗口搬到 <paramref name="desktopId"/>。不枚举、开销小。</summary>
+    private void MoveListedGhostWebViewWindowsToDesktop(Guid desktopId)
+    {
+        if (_virtualDesktop is null)
+            return;
+
+        _ghostWebViewHwnds.RemoveAll(h => !IsWindow(h));
+        var moved = MoveGhostWebViewWindowListToDesktop(_ghostWebViewHwnds, desktopId);
+        if (moved > 0)
+            _runLog?.Append($"[shell] 已把 {moved} 个被藏起的 WebView2 顶层窗口搬回主窗口所在虚拟桌面");
+    }
+
+    /// <summary>逐窗口搬移；单个窗口抛异常就停（多半是权限/句柄问题，一直重试只会刷屏）。</summary>
+    private int MoveGhostWebViewWindowListToDesktop(List<IntPtr> targets, Guid desktopId)
+    {
+        var moved = 0;
+        foreach (var h in targets)
+        {
+            if (!IsWindow(h))
+                continue;
+            try
+            {
+                if (_virtualDesktop!.MoveWindowToDesktop(h, ref desktopId) == 0)
+                    moved++;
+            }
+            catch (Exception ex)
+            {
+                _runLog?.Append($"[shell] 虚拟桌面搬移 WebView2 顶层窗口失败：{ex.GetType().Name}: {ex.Message}");
+                break;
+            }
+        }
+        return moved;
+    }
+
+    /// <summary>懒创建 IVirtualDesktopManager（Windows 10+ 文档化 API）。失败（老系统等）记一次并停用。</summary>
+    private IVirtualDesktopManager? EnsureVirtualDesktopManager()
+    {
+        if (_virtualDesktop is not null || _virtualDesktopChecked)
+            return _virtualDesktop;
+
+        _virtualDesktopChecked = true;
+        try
+        {
+            var clsid = new Guid("AA509086-5CA9-4C25-8F95-589D3C07B48A"); // CLSID_VirtualDesktopManager
+            var type = Type.GetTypeFromCLSID(clsid);
+            if (type is null || Activator.CreateInstance(type) is not IVirtualDesktopManager mgr)
+                throw new InvalidOperationException("无法激活 VirtualDesktopManager COM 对象");
+            _virtualDesktop = mgr;
+            _runLog?.Append("[shell] 虚拟桌面 API 可用（IVirtualDesktopManager），已启用桌面同步");
+        }
+        catch (Exception ex)
+        {
+            _virtualDesktop = null;
+            _runLog?.Append($"[shell] 虚拟桌面 API 不可用（老系统？），跳过桌面同步：{ex.GetType().Name}: {ex.Message}");
+        }
+        return _virtualDesktop;
     }
 
     /// <summary>
     /// 枚举要隐藏的 WebView2 顶层输入窗口：类名 Chrome_WidgetWin_1、无父窗口、属于本应用
     /// 拉起的 msedgewebview2 进程树、且矩形与最小化前的窗口客户区重合。
+    /// <paramref name="includeHidden"/>：虚拟桌面搬家要把"已被 shell 藏到别的桌面"的幽灵窗口
+    /// 也一并找出来搬走（它们此刻 IsWindowVisible=false，但矩形不随桌面切换而变）。
     /// </summary>
-    private List<IntPtr> FindGhostWebViewWindows()
+    private List<IntPtr> FindGhostWebViewWindows(bool includeHidden = false)
     {
         var result = new List<IntPtr>();
         if (!_hasLastVisibleRect)
@@ -888,7 +1099,7 @@ public partial class MainWindow : System.Windows.Window
             var sb = new System.Text.StringBuilder(64);
             if (GetClassName(h, sb, 64) == 0 || sb.ToString() != "Chrome_WidgetWin_1")
                 return true;
-            if (!IsWindowVisible(h) || GetParent(h) != IntPtr.Zero || !GetWindowRect(h, out var r))
+            if ((!includeHidden && !IsWindowVisible(h)) || GetParent(h) != IntPtr.Zero || !GetWindowRect(h, out var r))
                 return true;
 
             // 矩形重合才算：最大化时窗口会外扩一圈系统边框（本机 8px），容差必须盖住它。
@@ -1031,6 +1242,28 @@ public partial class MainWindow : System.Windows.Window
         public int Top;
         public int Right;
         public int Bottom;
+    }
+
+    // ---- Windows 10+ 虚拟桌面（文档化 COM：IVirtualDesktopManager）----
+    // 按微软文档用 CoCreateInstance(CLSID_VirtualDesktopManager) 拿到实例；
+    // .NET 里 Type.GetTypeFromCLSID + Activator.CreateInstance 即走 COM 激活。
+    // 老系统没有该对象，由 EnsureVirtualDesktopManager 捕获并停用（有日志）。
+
+    [ComImport, Guid("A5CD92FF-29BE-454C-8D04-D82879FB3F1B")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IVirtualDesktopManager
+    {
+        /// <summary>窗口是否在当前（已激活的）虚拟桌面上。处于其他桌面的窗口返回 false。</summary>
+        [PreserveSig]
+        int IsWindowOnCurrentVirtualDesktop(IntPtr topLevelWindow, [MarshalAs(UnmanagedType.Bool)] out bool onCurrentDesktop);
+
+        /// <summary>取窗口所在虚拟桌面的 id。</summary>
+        [PreserveSig]
+        int GetWindowDesktopId(IntPtr topLevelWindow, out Guid desktopId);
+
+        /// <summary>把顶层窗口挪到指定虚拟桌面。</summary>
+        [PreserveSig]
+        int MoveWindowToDesktop(IntPtr topLevelWindow, ref Guid desktopId);
     }
 
     /// <summary>
@@ -1756,6 +1989,7 @@ public partial class MainWindow : System.Windows.Window
 
     private void OnClosing(object? sender, CancelEventArgs e)
     {
+        StopVirtualDesktopSync();
         _shell.WindowX = (int)Left;
         _shell.WindowY = (int)Top;
         _shell.WindowWidth = (int)Width;
