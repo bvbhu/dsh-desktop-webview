@@ -235,6 +235,11 @@ jobs:
           $repo = "${{ github.repository }}"
           $tag  = $env:RELEASE_TAG
           if ([string]::IsNullOrWhiteSpace($tag)) { throw "RELEASE_TAG 为空，拒绝发布" }
+          # 第一道防呆：RELEASE_TAG 必须是滚动 tag，绝不接受正式版本号形态（v1.2.3 / 1.2.3）。
+          # 滚动 tag 用固定名（ci-latest），正式发版走别的流程，本 job 只允许操作滚动预发布。
+          if ($tag -match '^v?\d+\.\d+\.\d+') {
+            throw "RELEASE_TAG='$tag' 看起来像正式版本号，拒绝发布 —— 本 job 只发布滚动预发布"
+          }
           # $assets 是本地文件路径，$names 是上传后在 Release 页显示的资产名，一一对应。
           $assets = @(
             "zips/DSH-Desktop-Webview.zip",
@@ -252,15 +257,25 @@ jobs:
           if ($LASTEXITCODE -eq 0) { $exists = $true }
 
           if (-not $exists) {
-            # 防呆：tag 必须是「尚不存在」或「本仓库自己的轻量 tag」。
-            # 绝不允许 CI 首次创建时就套在正式版本 tag 上，否则会把正式版标成预发布。
-            gh api "repos/$repo/git/ref/tags/$tag" 2>$null | Out-Null
+            # 第二道防呆：tag 必须「尚不存在」或「本仓库自己的轻量 tag」。
+            # 轻量 tag 由 gh release create 创建（直接指向 commit）；注解 tag（object.type=tag、
+            # 指向 tag 对象）多半来自正式发版流程 —— 绝不允许 CI 首次创建时就套在正式版本 tag 上。
+            $tagRef = gh api "repos/$repo/git/ref/tags/$tag" 2>$null | ConvertFrom-Json
             if ($LASTEXITCODE -eq 0) {
-              throw "tag '$tag' 已指向既有对象，拒绝创建 Release —— 请确认 RELEASE_TAG 没被改成正式版本 tag"
+              if ($tagRef.object.type -ne "commit") {
+                throw "tag '$tag' 是注解 tag（object.type=$($tagRef.object.type)），疑似正式版本 tag，拒绝创建 Release —— 请确认 RELEASE_TAG 没被改成正式版本 tag"
+              }
+              # 本仓库自己的轻量 tag（滚动流程残留：Release 被删但 tag 还在）→ 放行：
+              # 先把它挪到本次 commit，再让 gh release create 挂到这个现有 tag 上。
+              Write-Host "tag '$tag' 已存在且是本仓库的轻量 tag，先移到本次 commit 再复用"
+              gh api -X PATCH "repos/$repo/git/refs/tags/$tag" `
+                -f sha="${{ github.sha }}" -F force=true | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw "移动 tag '$tag' 到本次 commit 失败: $LASTEXITCODE" }
             }
 
             Write-Host "创建固定预发布 Release: $tag"
             # --target 让 tag 落在本次构建的 commit 上（dispatch 到非默认分支时也不会指错）。
+            # tag 已由上面 PATCH 挪好时，gh release create 直接复用它，不再新建。
             gh release create $tag `
               --repo $repo `
               --target "${{ github.sha }}" `
