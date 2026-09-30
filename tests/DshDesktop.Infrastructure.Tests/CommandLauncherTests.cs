@@ -143,6 +143,13 @@ public class CommandLauncherTests
     /// 因此改由 PowerShell 显式写 UTF-8 字节到 stdout —— 与 dsh/node 的行为一致。
     /// 断言用 <c>Contain</c> 精确匹配中文串：GBK 误解码时这些字一个都不会出现。
     /// </para>
+    /// <para>
+    /// 必须用 <c>[Console]::Out.WriteLine</c> 而不是 <c>Write-Output</c>：后者经 PowerShell
+    /// 的宿主输出层，GC 上（testhost + stdout 管道重定向）实测会既不输出也不退出直到超时
+    /// （CI 2026-09 实锤），而直接写底层 <see cref="Console.Out"/> 立即生效 —— 与下方
+    /// stderr 版用 <c>[Console]::Error.WriteLine</c> 同构。UTF-8 编码由先设置的
+    /// <c>[Console]::OutputEncoding</c> 决定，两种写法字节一致。
+    /// </para>
     /// </summary>
     [Fact]
     public async Task Launch_DecodesUtf8Stdout_SoChineseIsReadable()
@@ -150,7 +157,7 @@ public class CommandLauncherTests
         const string chinese = "自动重启引擎就绪";
         var cfg = MakeConfig(
             "powershell -NoProfile -Command \"[Console]::OutputEncoding=[Text.Encoding]::UTF8; " +
-            $"Write-Output '{chinese}'\"");
+            $"[Console]::Out.WriteLine('{chinese}')\"");
         using var launcher = new CommandLauncher();
 
         var result = await launcher.LaunchAsync(cfg, MakeProgress(new()), CancellationToken.None);
